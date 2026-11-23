@@ -1,3 +1,27 @@
+## Estado de avance
+
+- Fase 4 (Interfaz): completada, según confirmación del equipo.
+- Fase 5 (Pruebas de extremo a extremo): iniciada.
+- Preparado en esta fase: generador de datos repetible y primeras pruebas de
+  ida y vuelta, casos de normalización, DF inválidas, claves alternativas y
+  DF trivial en `src/test_fase5.py`.
+- Pendiente para cerrar fase 5: ejecutar las pruebas, verificar ida y vuelta
+  real en MySQL, probar errores de conexión/tabla, medir rendimiento y hacer
+  la revisión cruzada del equipo.
+
+Para ejecutar las pruebas puras de fase 5:
+
+```powershell
+python -m unittest discover -s src -p "test_fase5*.py" -v
+```
+
+La prueba MySQL es opcional y solo se habilita contra `DATABASE=pruebas`:
+
+```powershell
+$env:RUN_MYSQL_E2E = "1"
+python -m unittest discover -s src -p "test_fase5*.py" -v
+```
+
 ## 1. Núcleo
 Referencias en docs/info/: todas
 Objetivo: tener todo el análisis matemático funcionando en memoria, sin base de datos ni interfaz.

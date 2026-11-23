@@ -1,0 +1,8 @@
+.env
+requirements.txt
+__pycache__/
+.vscode/
+tests/
+.gitignore
+.env.example
+

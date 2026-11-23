@@ -11,6 +11,8 @@ from datos.conexion_mysql import (
 )
 from datos.casos_sql import CASOS_SQL, ejecutar_caso
 from datos.propuestas import propuesta_para
+from datos.propuestas import TABLA_ORIGEN_CASO
+from datos.migracion_propuesta import aplicar_propuesta
 from datos.generador_sql import (
     ejecutar_migracion,
     generar_migracion_demo,
@@ -91,6 +93,7 @@ class AplicacionTk(tk.Tk):
         self.minsize(820, 560)
 
         self.estado = crear_estado_inicial()
+        self._propuesta_visible = None
         self._configurar_estilo()
         self._crear_estado_visual()
         self._crear_pestanas()
@@ -429,17 +432,24 @@ class AplicacionTk(tk.Tk):
         try:
             resultado = ejecutar_caso(conexion, caso)
             self.estado["df"] = ()
+            self.estado["tabla"] = ""
+            self.estado["atributos"] = frozenset()
+            self.estado["tipos"] = {}
             self.estado["tabla_confirmada"] = ""
             self.estado["atributos_confirmados"] = frozenset()
             self.estado["tipos_confirmados"] = {}
             self.estado["pk_confirmada"] = frozenset()
             self.estado["fk_confirmadas"] = frozenset()
             self.estado["aks_confirmadas"] = ()
+            self.estado["relaciones_fk"] = ()
             self.estado["resultados"] = {}
             self.entrada_tabla_df.delete(0, tk.END)
+            self.entrada_df_texto.delete(0, tk.END)
             self.entrada_tabla_analisis.delete(0, tk.END)
             self.texto_df.delete("1.0", tk.END)
             self.texto_analisis.delete("1.0", tk.END)
+            self._propuesta_visible = None
+            self.canvas_tabla.delete("all")
             self.listar_tablas()
             self.estado_label.configure(
                 text=f"Caso SQL cargado: {caso}"
@@ -461,6 +471,20 @@ class AplicacionTk(tk.Tk):
         tabla = self.lista_tablas.get(seleccion[0])
         try:
             columnas = listar_columnas(conexion, tabla)
+            if tabla != self.estado["tabla_confirmada"]:
+                self.estado["df"] = ()
+                self.estado["tabla_confirmada"] = ""
+                self.estado["atributos_confirmados"] = frozenset()
+                self.estado["tipos_confirmados"] = {}
+                self.estado["pk_confirmada"] = frozenset()
+                self.estado["fk_confirmadas"] = frozenset()
+                self.estado["aks_confirmadas"] = ()
+                self.estado["resultados"] = {}
+                self.texto_df.delete("1.0", tk.END)
+                self.texto_analisis.delete("1.0", tk.END)
+                self.entrada_df_texto.delete(0, tk.END)
+                self._propuesta_visible = None
+                self.canvas_tabla.delete("all")
             self.estado["tabla"] = tabla
             self.estado["atributos"] = frozenset(
                 columna["nombre"] for columna in columnas
@@ -552,6 +576,9 @@ class AplicacionTk(tk.Tk):
         if not tabla:
             self._error("Indique una tabla.")
             return
+        if tabla != self.estado["tabla_confirmada"]:
+            self._error("Confirme esa tabla en Análisis antes de cargar sus DF.")
+            return
         if not atributos:
             conexion = self.estado["conexion"]
             if conexion is None:
@@ -567,6 +594,9 @@ class AplicacionTk(tk.Tk):
             }
         try:
             df = parsear_dependencias(self.entrada_df_texto.get(), atributos)
+            self.estado["resultados"] = {}
+            self.texto_analisis.delete("1.0", tk.END)
+            self.canvas_tabla.delete("all")
             self.estado["tabla"] = tabla
             self.estado["df"] = df
             self.estado["tabla_confirmada"] = tabla
@@ -657,11 +687,27 @@ class AplicacionTk(tk.Tk):
         panel_texto = ttk.Frame(dividido)
         panel_visual = ttk.Frame(dividido)
         dividido.add(panel_texto, weight=1)
-        dividido.add(panel_visual, weight=2)
+        dividido.add(panel_visual, weight=1)
 
-        self.texto_analisis = TextoSoloLectura(panel_texto, height=24)
+        self.texto_analisis = TextoSoloLectura(
+            panel_texto, height=24, wrap=tk.WORD
+        )
+        self.texto_analisis.configure(font=("Segoe UI", 9))
+        self.texto_analisis.tag_configure(
+            "encabezado", font=("Segoe UI", 10, "bold"), foreground="#174a6e"
+        )
+        self.texto_analisis.tag_configure(
+            "subtitulo", font=("Segoe UI", 9, "bold"), spacing1=5
+        )
         self.texto_analisis.configure(state="disabled")
-        self.texto_analisis.pack(fill="both", expand=True)
+        scroll_texto = ttk.Scrollbar(
+            panel_texto, orient="vertical", command=self.texto_analisis.yview
+        )
+        self.texto_analisis.configure(yscrollcommand=scroll_texto.set)
+        self.texto_analisis.grid(row=0, column=0, sticky="nsew")
+        scroll_texto.grid(row=0, column=1, sticky="ns")
+        panel_texto.grid_rowconfigure(0, weight=1)
+        panel_texto.grid_columnconfigure(0, weight=1)
 
         canvas_frame = ttk.Frame(panel_visual)
         canvas_frame.pack(fill="both", expand=True)
@@ -674,9 +720,15 @@ class AplicacionTk(tk.Tk):
             highlightthickness=1,
             highlightbackground="#b8b8b8",
         )
+        self.canvas_tabla.bind("<Configure>", self._redimensionar_propuesta)
+        scroll_canvas = ttk.Scrollbar(
+            canvas_frame, orient="vertical", command=self.canvas_tabla.yview
+        )
+        self.canvas_tabla.configure(yscrollcommand=scroll_canvas.set)
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
         self.canvas_tabla.grid(row=0, column=0, sticky="nsew")
+        scroll_canvas.grid(row=0, column=1, sticky="ns")
 
     def confirmar_tabla(self) -> None:
         """Confirma que la tabla existe y dibuja sus columnas y filas.
@@ -705,12 +757,14 @@ class AplicacionTk(tk.Tk):
                 )
             claves = listar_claves(conexion, tabla)
 
-            tabla_anterior = self.estado["tabla"]
+            tabla_anterior = self.estado["tabla_confirmada"]
             if tabla_anterior and tabla_anterior != tabla:
                 self.estado["df"] = ()
                 self.texto_df.delete("1.0", tk.END)
                 self.texto_analisis.delete("1.0", tk.END)
                 self.estado["resultados"] = {}
+                self.entrada_df_texto.delete(0, tk.END)
+                self.canvas_tabla.delete("all")
 
             atributos = frozenset(
                 columna["nombre"] for columna in columnas
@@ -727,6 +781,7 @@ class AplicacionTk(tk.Tk):
             self.estado["pk_confirmada"] = claves["pk"]
             self.estado["fk_confirmadas"] = claves["fk"]
             self.estado["aks_confirmadas"] = claves["aks"]
+            self.estado["relaciones_fk"] = ()
 
             nombres = self._ordenar_nombres_por_clave(
                 sorted(atributos),
@@ -807,6 +862,7 @@ class AplicacionTk(tk.Tk):
             fk,
             aks,
         )
+        self._propuesta_visible = None
         canvas = self.canvas_tabla
         canvas.delete("all")
         canvas.create_text(
@@ -866,16 +922,20 @@ class AplicacionTk(tk.Tk):
         contenedor.grid_rowconfigure(0, weight=1)
         contenedor.grid_columnconfigure(0, weight=1)
 
+        ancho_vista = max(240, canvas.winfo_width() - 28)
+        alto_vista = max(160, canvas.winfo_height() - 78)
         canvas_window = canvas.create_window(
             12,
             58,
             anchor="nw",
-            width=500,
-            height=280,
+            width=ancho_vista,
+            height=alto_vista,
             window=contenedor,
         )
         canvas.itemconfigure(canvas_window)
-        canvas.configure(scrollregion=(0, 0, 530, 350))
+        canvas.configure(
+            scrollregion=(0, 0, ancho_vista + 24, alto_vista + 68)
+        )
 
     def dibujar_propuesta_normalizacion(self) -> None:
         """Dibuja las relaciones propuestas por síntesis 3FN."""
@@ -887,6 +947,9 @@ class AplicacionTk(tk.Tk):
             )
             return
         nombre_caso = self.selector_caso.get().strip()
+        if self.estado["tabla_confirmada"] != TABLA_ORIGEN_CASO.get(nombre_caso):
+            self._error("Confirme la tabla de origen correspondiente al caso SQL.")
+            return
         propuesta = propuesta_para(nombre_caso, atributos, df)
         self._dibujar_propuesta(propuesta)
 
@@ -894,21 +957,34 @@ class AplicacionTk(tk.Tk):
         self,
         propuesta,
     ) -> None:
-        """Representa entidades, claves y relaciones normalizadas."""
+        """Representa una propuesta adaptada al ancho real del lienzo."""
+        self._propuesta_visible = propuesta
+        self._pintar_propuesta(propuesta)
+
+    def _redimensionar_propuesta(self, evento=None) -> None:
+        """Redibuja las tarjetas cuando cambia el ancho del panel."""
+        if self._propuesta_visible is not None:
+            self._pintar_propuesta(self._propuesta_visible)
+
+    def _pintar_propuesta(self, propuesta) -> None:
         canvas = self.canvas_tabla
         canvas.delete("all")
+        ancho = max(320, canvas.winfo_width())
+        margen = 18
+        ancho_tarjeta = ancho - margen * 2
+        separacion = 34
+        sin_descomposicion = len(propuesta.entidades) == 1
         canvas.create_text(
-            12,
-            18,
+            margen,
+            16,
             anchor="nw",
-            text="Propuesta normalizada",
+            text=("Diseño actual · sin descomposición"
+                  if sin_descomposicion else "Propuesta normalizada"),
             font=("Segoe UI", 11, "bold"),
         )
-        posiciones: dict[str, tuple[int, int]] = {}
-        for indice, entidad in enumerate(propuesta.entidades, start=1):
-            x = 12 + ((indice - 1) % 2) * 250
-            y = 55 + ((indice - 1) // 2) * 145
-            posiciones[entidad.nombre] = (x, y)
+        tarjetas = {}
+        y = 48
+        for entidad in propuesta.entidades:
             filas = []
             for atributo in entidad.atributos:
                 rol = []
@@ -924,61 +1000,78 @@ class AplicacionTk(tk.Tk):
                     rol.append("AK")
                 sufijo = f" [{'/'.join(rol)}]" if rol else ""
                 filas.append(f"{atributo}{sufijo}")
-
+            alto = max(88, 54 + len(filas) * 18)
+            tarjetas[entidad.nombre] = {
+                "x": margen, "y": y, "w": ancho_tarjeta, "h": alto,
+            }
             canvas.create_rectangle(
-                x,
+                margen,
                 y,
-                x + 230,
-                y + 105,
-                fill="#eef4fb",
-                outline="#6b7280",
+                margen + ancho_tarjeta,
+                y + alto,
+                fill="#ecfdf5" if sin_descomposicion else "#eef4fb",
+                outline="#15803d" if sin_descomposicion else "#6b7280",
             )
             canvas.create_text(
-                x + 12,
+                margen + 12,
                 y + 12,
                 anchor="nw",
                 text=entidad.nombre,
                 font=("Segoe UI", 10, "bold"),
             )
             canvas.create_text(
-                x + 12,
-                y + 35,
+                margen + 12,
+                y + 36,
                 anchor="nw",
                 text="\n".join(filas),
                 font=("Courier", 9),
-                width=205,
+                width=ancho_tarjeta - 24,
             )
+            y += alto + separacion
+
+        # Las conexiones salen por el margen izquierdo para no cruzar tarjetas.
+        indices_por_par = {}
         for relacion in propuesta.relaciones:
-            if relacion.origen not in posiciones or relacion.destino not in posiciones:
+            if relacion.origen not in tarjetas or relacion.destino not in tarjetas:
                 continue
-            origen_x, origen_y = posiciones[relacion.origen]
-            destino_x, destino_y = posiciones[relacion.destino]
-            origen_centro = (origen_x + 230, origen_y + 52)
-            destino_centro = (destino_x, destino_y + 52)
+            origen = tarjetas[relacion.origen]
+            destino = tarjetas[relacion.destino]
+            grupo = (relacion.origen, relacion.destino)
+            desplazamiento = indices_por_par.get(grupo, 0) * 8
+            indices_por_par[grupo] = indices_por_par.get(grupo, 0) + 1
+            x_ruta = margen - 7 - desplazamiento
+            origen_y = origen["y"] + origen["h"] / 2
+            destino_y = destino["y"] + destino["h"] / 2
             canvas.create_line(
-                origen_centro[0],
-                origen_centro[1],
-                destino_centro[0],
-                destino_centro[1],
+                margen, origen_y,
+                x_ruta, origen_y,
+                x_ruta, destino_y,
+                margen, destino_y,
                 fill="#2563eb",
                 width=2,
                 arrow=tk.LAST,
             )
+        if propuesta.relaciones:
+            y += 4
             canvas.create_text(
-                (origen_centro[0] + destino_centro[0]) // 2,
-                (origen_centro[1] + destino_centro[1]) // 2 - 8,
-                text=f"{relacion.atributo_origen} -> "
-                     f"{relacion.atributo_destino}",
-                fill="#1d4ed8",
-                font=("Segoe UI", 8),
+                margen, y,
+                anchor="nw",
+                text="Relaciones",
+                font=("Segoe UI", 9, "bold"),
             )
+            y += 20
+            for relacion in propuesta.relaciones:
+                canvas.create_text(
+                    margen + 4, y,
+                    anchor="nw",
+                    text=(f"{relacion.origen}.{relacion.atributo_origen}  →  "
+                          f"{relacion.destino}.{relacion.atributo_destino}"),
+                    fill="#1d4ed8",
+                    font=("Segoe UI", 8),
+                )
+                y += 18
         canvas.configure(
-            scrollregion=(
-                0,
-                0,
-                520,
-                55 + len(propuesta.entidades) * 155,
-            )
+            scrollregion=(0, 0, ancho, y + 20)
         )
 
     def aplicar_propuesta_normalizacion(self) -> None:
@@ -994,75 +1087,28 @@ class AplicacionTk(tk.Tk):
                 raise ValueError("Establezca las DF en la pestaña DF.")
 
             nombre_caso = self.selector_caso.get().strip()
+            tabla_esperada = TABLA_ORIGEN_CASO.get(nombre_caso)
+            if tabla_origen != tabla_esperada:
+                raise ValueError(
+                    f"El caso {nombre_caso} usa {tabla_esperada}; "
+                    f"confirme esa tabla antes de aplicar la propuesta."
+                )
             propuesta = propuesta_para(nombre_caso, atributos, df)
             tipos = self.estado["tipos_confirmados"]
-            cursor = conexion.cursor()
-            sentencias: list[str] = []
-            try:
-                conexion.start_transaction()
-                for entidad in propuesta.entidades:
-                    nombre = entidad.nombre
-                    columnas = list(entidad.atributos)
-                    definiciones = []
-                    for columna in columnas:
-                        tipo = tipos.get(columna, "VARCHAR(255)")
-                        definiciones.append(
-                            f"{escapar_identificador(columna)} {tipo}"
-                        )
-                    if entidad.pk:
-                        definiciones.append(
-                            "PRIMARY KEY (" +
-                            ", ".join(
-                                escapar_identificador(columna)
-                                for columna in entidad.pk
-                            ) +
-                            ")"
-                        )
-                    for atributo, tabla_ref, atributo_ref in entidad.fk:
-                        definiciones.append(
-                            f"FOREIGN KEY ({escapar_identificador(atributo)}) "
-                            f"REFERENCES {escapar_identificador(tabla_ref)} "
-                            f"({escapar_identificador(atributo_ref)})"
-                        )
-                    for atributo in entidad.ak:
-                        definiciones.append(
-                            f"UNIQUE KEY ({escapar_identificador(atributo)})"
-                        )
-                    sentencias.append(
-                        f"CREATE TABLE IF NOT EXISTS "
-                        f"{escapar_identificador(nombre)} "
-                        f"({', '.join(definiciones)})"
-                    )
-                    cursor.execute(sentencias[-1])
-                    cursor.execute(
-                        f"DELETE FROM {escapar_identificador(nombre)}"
-                    )
-                    seleccion = ", ".join(
-                        escapar_identificador(columna)
-                        for columna in columnas
-                    )
-                    if columnas:
-                        cursor.execute(
-                            f"INSERT INTO {escapar_identificador(nombre)} "
-                            f"({seleccion}) "
-                            f"SELECT DISTINCT {seleccion} "
-                            f"FROM {escapar_identificador(tabla_origen)}"
-                        )
-                conexion.commit()
-            except Exception:
-                conexion.rollback()
-                raise
-            finally:
-                cursor.close()
+            resultado = aplicar_propuesta(
+                conexion, tabla_origen, propuesta, tipos
+            )
 
             self._dibujar_propuesta(propuesta)
             self.estado["resultados"]["propuesta"] = {
                 "entidades": propuesta.entidades,
                 "relaciones": propuesta.relaciones,
-                "sentencias": tuple(sentencias),
+                "sentencias": resultado["ddl"],
+                "conteos": resultado["entidades"],
             }
             self.estado_label.configure(
-                text=f"Propuesta aplicada: {len(relaciones)} tablas creadas"
+                text=f"Propuesta aplicada y verificada: "
+                     f"{len(propuesta.entidades)} entidades"
             )
         except Exception as error:
             self._error(error)
@@ -1077,6 +1123,9 @@ class AplicacionTk(tk.Tk):
         tabla = self.entrada_tabla_analisis.get().strip()
         atributos_confirmados = self.estado["atributos_confirmados"]
         tabla_confirmada = self.estado["tabla_confirmada"]
+        if tabla_confirmada and tabla != tabla_confirmada:
+            self._error("Confirme la tabla seleccionada antes de analizarla.")
+            return
         atributos = (
             atributos_confirmados
             if tabla_confirmada and tabla == tabla_confirmada
@@ -1089,6 +1138,7 @@ class AplicacionTk(tk.Tk):
             try:
                 df = parsear_dependencias(texto_df, atributos)
                 self.estado["df"] = df
+                self.estado["resultados"].pop("propuesta", None)
             except Exception as error:
                 self._error(error)
                 return
@@ -1164,59 +1214,85 @@ class AplicacionTk(tk.Tk):
                 ),
             }
 
-            self.texto_analisis.delete("1.0", tk.END)
-            self.texto_analisis.insert(tk.END, f"Cierre(X): {sorted(cierre_resultado)}\n")
+            def lista_nombres(valores) -> str:
+                ordenados = sorted(valores)
+                if not ordenados:
+                    return "ninguno"
+                if len(ordenados) == 1:
+                    return ordenados[0]
+                return ", ".join(ordenados[:-1]) + " y " + ordenados[-1]
+
+            def lista_claves(conjuntos) -> str:
+                return "; ".join(
+                    lista_nombres(conjunto) for conjunto in conjuntos
+                ) or "ninguna declarada"
+
+            secciones = [("RESUMEN", f"Tabla analizada: {tabla}.")]
+            if x_atributos:
+                detalle_cierre = (
+                    f"a partir de {lista_nombres(x_atributos)} se pueden "
+                    f"conocer {lista_nombres(cierre_resultado)}."
+                )
+            else:
+                detalle_cierre = "No se indicó un conjunto de atributos X."
             if y_atributos:
-                resultado_implica = "Sí" if implicacion else "No"
-                self.texto_analisis.insert(
-                    tk.END,
-                    f"Implica ({', '.join(sorted(x_atributos))}) "
-                    f"-> ({', '.join(sorted(y_atributos))}): "
-                    f"{resultado_implica}\n",
+                detalle_cierre += (
+                    f" La pregunta «{lista_nombres(x_atributos)} determina "
+                    f"{lista_nombres(y_atributos)}»: "
+                    f"{'sí' if implicacion else 'no'}."
                 )
-            self.texto_analisis.insert(
-                tk.END,
-                f"PK declarada: {[sorted(k) for k in ((pk,) if pk else ())]}\n",
+            secciones.append(("CIERRE E IMPLICACIÓN", detalle_cierre))
+            secciones.append((
+                "CLAVES",
+                f"Clave principal: {lista_nombres(pk) if pk else 'ninguna declarada'}. "
+                f"Combinaciones que identifican una fila: {lista_claves(claves)}.",
+            ))
+            secciones.append((
+                "FORMAS NORMALES",
+                "1FN — exige un solo valor por casilla (valores atómicos): "
+                f"{'cumple' if reportes['1fn']['cumple'] else 'no cumple'}.\n"
+                "2FN — exige que los datos no clave dependan de toda la clave, "
+                "no solo de una parte: "
+                f"{'cumple' if reportes['2fn']['cumple'] else 'no cumple; hay una dependencia parcial'}.\n"
+                "3FN — exige que el determinante sea superclave o que cada dato "
+                "determinado forme parte de una clave candidata: "
+                f"{'cumple' if reportes['3fn']['cumple'] else 'no cumple; hay una dependencia que no satisface ninguna condición'}.\n"
+                "BCNF — exige que todo determinante de una dependencia no "
+                "trivial sea superclave, sin la excepción de 3FN: "
+                f"{'cumple' if reportes['bcnf']['cumple'] else 'no cumple; hay un determinante que no identifica la fila completa'}."
+            ))
+            self.texto_analisis.delete("1.0", tk.END)
+            nombre_caso = self.selector_caso.get().strip()
+            requiere_propuesta = (
+                not reportes["3fn"]["cumple"]
+                or (nombre_caso == "caso_3_bcnf" and not reportes["bcnf"]["cumple"])
             )
-            self.texto_analisis.insert(
-                tk.END,
-                f"FK declaradas: {sorted(fk)}\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                f"AK declaradas: {[sorted(k) for k in aks]}\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                f"Claves candidatas válidas: {[sorted(k) for k in claves]}\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                "Atributos primos: "
-                f"{sorted(primos)} "
-                "(pertenecen a alguna PK/AK candidata)\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                f"Cobertura mínima: {[str(d) for d in cobertura]}\n",
-            )
-            for nombre, reporte in reportes.items():
-                self.texto_analisis.insert(
-                    tk.END,
-                    f"{nombre.upper()}: {reporte['mensaje']}\n",
-                )
-            if not reportes["3fn"]["cumple"]:
-                relaciones = sintetizar_3fn(atributos, df)
+            if requiere_propuesta:
+                if tabla != TABLA_ORIGEN_CASO.get(nombre_caso):
+                    raise ValueError(
+                        "Confirme la tabla de origen correspondiente al caso SQL."
+                    )
+                propuesta = propuesta_para(nombre_caso, atributos, df)
                 self.estado["resultados"]["propuesta"] = {
-                    "relaciones": relaciones,
+                    "entidades": propuesta.entidades,
+                    "relaciones": propuesta.relaciones,
                     "sentencias": (),
                 }
+                secciones.append((
+                    "CONCLUSIÓN",
+                    "El caso requiere descomposición. Puedes elegir «Dibujar propuesta» "
+                    "para verla o «Aplicar propuesta» para normalizar los datos.",
+                ))
+            else:
+                secciones.append((
+                    "CONCLUSIÓN",
+                    "La tabla no requiere descomposición según las formas normales evaluadas.",
+                ))
+            for subtitulo, contenido in secciones:
                 self.texto_analisis.insert(
-                    tk.END,
-                    "La tabla no cumple 3FN; propuesta disponible "
-                    "en Dibujar/Aplicar propuesta.\n",
+                    tk.END, subtitulo + "\n", "encabezado"
                 )
-                self._dibujar_propuesta(relaciones)
+                self.texto_analisis.insert(tk.END, contenido + "\n\n")
             self.estado["resultados"]["analisis"] = {
                 "cierre": cierre_resultado,
                 "claves": claves,
@@ -1237,8 +1313,10 @@ class AplicacionTk(tk.Tk):
         """
         self.entrada_cierre.delete(0, tk.END)
         self.texto_analisis.delete("1.0", tk.END)
+        self._propuesta_visible = None
         self.canvas_tabla.delete("all")
         self.estado["resultados"].pop("analisis", None)
+        self.estado["resultados"].pop("propuesta", None)
         self.estado_label.configure(text="Análisis limpiado")
 
     def _crear_sql(self) -> None:

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from collections.abc import Iterable
 
 from src.dependencias import DF
-from src.descomposicion import sintetizar_3fn
+from src.cierre import implica
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +151,35 @@ PROPUESTAS = {
     ),
 }
 
+DF_REQUERIDAS = {
+    "caso_1_2fn": (
+        DF("id_pedido,id_producto", "cantidad"),
+        DF("id_producto", "nombre_producto,precio"),
+    ),
+    "caso_2_3fn": (
+        DF("codigo_estudiante", "nombres,programa"),
+        DF("programa", "valor_semestre"),
+    ),
+    "caso_3_bcnf": (
+        DF("alumno,curso", "profesor"),
+        DF("profesor", "curso"),
+    ),
+    "caso_4_dos_claves": (
+        DF("dni", "email,nombre,ciudad"),
+        DF("email", "dni,nombre,ciudad"),
+    ),
+    "caso_5_bcnf_ok": (DF("id_empleado", "nombre,ciudad"),),
+}
+
+# Tabla de laboratorio que contiene cada esquema de origen.
+TABLA_ORIGEN_CASO = {
+    "caso_1_2fn": "caso_1_pedidos",
+    "caso_2_3fn": "caso_2_estudiantes",
+    "caso_3_bcnf": "caso_3_asignaciones",
+    "caso_4_dos_claves": "caso_4_personas",
+    "caso_5_bcnf_ok": "caso_5_empleados",
+}
+
 
 def propuesta_para(
     nombre_caso: str,
@@ -163,6 +192,29 @@ def propuesta_para(
     propuesta = PROPUESTAS.get(nombre_caso)
 
     if propuesta is not None:
+        esperados = frozenset(
+            atributo
+            for entidad in propuesta.entidades
+            for atributo in entidad.atributos
+        )
+        faltantes = esperados - esquema
+        adicionales = esquema - esperados
+        if faltantes or adicionales:
+            raise ValueError(
+                f"El esquema no corresponde a {nombre_caso}. "
+                f"Faltan: {', '.join(sorted(faltantes)) or 'ninguno'}; "
+                f"sobran: {', '.join(sorted(adicionales)) or 'ninguno'}."
+            )
+        no_satisfechas = tuple(
+            dependencia for dependencia in DF_REQUERIDAS[nombre_caso]
+            if not implica(dependencias, dependencia.lado_izquierdo,
+                           dependencia.lado_derecho)
+        )
+        if no_satisfechas:
+            raise ValueError(
+                f"Las DF actuales no justifican la propuesta de {nombre_caso}. "
+                "Revise las dependencias requeridas del caso."
+            )
         entidades = tuple(
             EntidadPropuesta(
                 entidad.nombre,
@@ -187,15 +239,4 @@ def propuesta_para(
         if entidades:
             return PropuestaCaso(entidades, relaciones)
 
-    relaciones_genericas = sintetizar_3fn(esquema, dependencias)
-    entidades_genericas = tuple(
-        EntidadPropuesta(
-            f"RELACION_{indice}",
-            tuple(sorted(relacion))[:1],
-            (),
-            (),
-            tuple(sorted(relacion)),
-        )
-        for indice, relacion in enumerate(relaciones_genericas, start=1)
-    )
-    return PropuestaCaso(entidades_genericas, ())
+    raise ValueError(f"No hay propuesta válida para el caso {nombre_caso!r}.")

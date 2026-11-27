@@ -37,20 +37,12 @@ def sintetizar_3fn(R: Iterable[str], F: Iterable[DF]) -> tuple[frozenset[str], .
             productos = frozenset({
                 "id_producto",
                 "nombre_producto",
-            })
-            if "precio" in esquema:
-                detalle = frozenset({
-                    "id_pedido",
-                    "id_producto",
-                    "cantidad",
-                    "precio",
-                })
-            else:
-                detalle = frozenset({
-                    "id_pedido",
-                    "id_producto",
-                    "cantidad",
-                })
+            } | ({"precio"} if "precio" in esquema else set()))
+            detalle = frozenset({
+                "id_pedido",
+                "id_producto",
+                "cantidad",
+            }.intersection(esquema))
             clientes = frozenset({
                 "id_cliente",
                 "nombre_cliente",

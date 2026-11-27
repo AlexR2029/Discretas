@@ -1,3 +1,29 @@
+## Estado de avance
+
+- Fase 4 (Interfaz): completada, según confirmación del equipo.
+- Fase 5 (Pruebas de extremo a extremo): completada, según confirmación del
+  equipo.
+- Fase 6 (Empaquetado y entrega): iniciada.
+- Preparado en esta fase: guía de salida limpia en
+  `docs/fase6_entrega.md` y flujo de compilación en
+  `scripts/build_release.ps1`.
+- Pendiente para cerrar fase 6: congelar versiones reales, compilar y probar
+  el `.exe` en Windows limpio, actualizar el README con versiones verificadas,
+  preparar capturas y respaldo de sustentación, y etiquetar v1.0.
+
+Para ejecutar las pruebas puras de fase 5:
+
+```powershell
+python -m unittest discover -s src -p "test_fase5*.py" -v
+```
+
+La prueba MySQL es opcional y solo se habilita contra `DATABASE=pruebas`:
+
+```powershell
+$env:RUN_MYSQL_E2E = "1"
+python -m unittest discover -s src -p "test_fase5*.py" -v
+```
+
 ## 1. Núcleo
 Referencias en docs/info/: todas
 Objetivo: tener todo el análisis matemático funcionando en memoria, sin base de datos ni interfaz.

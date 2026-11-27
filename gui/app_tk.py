@@ -2,18 +2,27 @@
 
 import tkinter as tk
 import re
-from tkinter import messagebox, ttk
+from pathlib import Path
+from tkinter import filedialog, messagebox, ttk
 
 from datos.conexion_mysql import (
     abrir_conexion,
     cerrar_conexion,
     leer_configuracion_mysql,
 )
-from datos.casos_sql import CASOS_SQL, ejecutar_caso
-from datos.propuestas import propuesta_para
+from datos.casos_sql import CASOS_SQL, TABLA_CARGADA_SQL, ejecutar_caso
+from datos.importador_sql import ejecutar_archivo_sql, preparar_archivo_sql
+from datos.propuestas import propuesta_nativa, propuesta_para
+from datos.propuestas import TABLA_ORIGEN_CASO
 from datos.generador_sql import (
     ejecutar_migracion,
-    generar_migracion_demo,
+    generar_ddl,
+    generar_upsert_desde,
+)
+from datos.sql_casos import generar_migracion_caso, tablas_destino_caso
+from gui.validacion_entrada import (
+    validar_consulta_cierre,
+    validar_dependencias,
 )
 from datos.lector_esquema import (
     listar_columnas,
@@ -30,8 +39,7 @@ from src.claves import (
     claves_candidatas_declaradas,
 )
 from src.cobertura import cobertura_minima
-from src.dependencias import DF, parsear_dependencias
-from src.descomposicion import descomponer_bcnf, sintetizar_3fn
+from src.dependencias import parsear_dependencias
 from src.formas_normales import es_1fn, es_2fn, es_3fn, es_bcnf
 
 
@@ -82,15 +90,16 @@ class AplicacionTk(tk.Tk):
         """Inicializa la ventana, el estado compartido y las pestañas.
 
         parámetros: ninguno.
-        retorno: None.
+        retorno: nombres de tablas disponibles, o tupla vacía si hubo error.
         complejidad: O(n), n widgets de las pestañas.
         """
         super().__init__()
         self.title("Normalizador de Esquemas Relacionales")
-        self.geometry("980x680")
-        self.minsize(820, 560)
+        self.geometry("1080x740")
+        self.minsize(900, 620)
 
         self.estado = crear_estado_inicial()
+        self._propuesta_visible = None
         self._configurar_estilo()
         self._crear_estado_visual()
         self._crear_pestanas()
@@ -104,7 +113,89 @@ class AplicacionTk(tk.Tk):
         """
         estilo = ttk.Style(self)
         estilo.theme_use("clam")
-        estilo.configure("TNotebook.Tab", padding=(14, 8))
+        fondo = "#f3f6fb"
+        superficie = "#ffffff"
+        tinta = "#172033"
+        tenue = "#64748b"
+        azul = "#2563eb"
+        self.configure(background=fondo)
+        estilo.configure(".", font=("Segoe UI", 10))
+        estilo.configure("TFrame", background=fondo)
+        estilo.configure("TLabel", background=fondo, foreground=tinta)
+        estilo.configure(
+            "TLabelFrame", background=superficie, foreground=tinta,
+            bordercolor="#d8e1ee", borderwidth=1, relief="solid", padding=10,
+        )
+        estilo.configure(
+            "TLabelFrame.Label", background=superficie, foreground=tenue,
+            font=("Segoe UI", 9, "bold"),
+        )
+        estilo.configure(
+            "TNotebook", background=fondo, borderwidth=0,
+            tabmargins=(4, 6, 4, 0),
+        )
+        estilo.configure(
+            "TNotebook.Tab", padding=(16, 9), background="#e7edf6",
+            foreground=tenue, borderwidth=0, font=("Segoe UI", 9, "bold"),
+        )
+        estilo.map(
+            "TNotebook.Tab",
+            background=[("selected", superficie), ("active", "#dce7f5")],
+            foreground=[("selected", azul), ("active", tinta)],
+        )
+        estilo.configure(
+            "TButton", padding=(12, 8), background="#e7edf6",
+            foreground=tinta, borderwidth=0, focusthickness=0,
+        )
+        estilo.map(
+            "TButton",
+            background=[("pressed", "#cbd8e8"), ("active", "#dce7f5")],
+            foreground=[("disabled", "#94a3b8")],
+        )
+        estilo.configure(
+            "Accent.TButton", padding=(14, 8), background=azul,
+            foreground=superficie, font=("Segoe UI", 9, "bold"),
+        )
+        estilo.map(
+            "Accent.TButton",
+            background=[("pressed", "#1d4ed8"), ("active", "#1d4ed8")],
+            foreground=[("disabled", "#dbeafe")],
+        )
+        estilo.configure(
+            "TEntry", padding=(8, 7), fieldbackground=superficie,
+            foreground=tinta, bordercolor="#cbd5e1", lightcolor="#cbd5e1",
+            darkcolor="#cbd5e1",
+        )
+        estilo.configure(
+            "TCombobox", padding=(7, 6), fieldbackground=superficie,
+            foreground=tinta, arrowcolor=tenue,
+        )
+        estilo.map("TCombobox", fieldbackground=[("readonly", superficie)])
+        estilo.configure(
+            "Treeview", background=superficie, fieldbackground=superficie,
+            foreground=tinta, rowheight=28, borderwidth=0,
+        )
+        estilo.configure(
+            "Treeview.Heading", background="#e7edf6", foreground="#334155",
+            font=("Segoe UI", 9, "bold"), relief="flat",
+        )
+        estilo.map("Treeview", background=[("selected", "#dbeafe")])
+        estilo.configure(
+            "Header.TFrame", background="#172554",
+        )
+        estilo.configure(
+            "HeaderTitle.TLabel", background="#172554", foreground="#ffffff",
+            font=("Segoe UI", 17, "bold"),
+        )
+        estilo.configure(
+            "HeaderSubtitle.TLabel", background="#172554", foreground="#c7d2fe",
+            font=("Segoe UI", 9),
+        )
+        estilo.configure("Status.TFrame", background="#e8eef7")
+        estilo.configure(
+            "Status.TLabel", background="#e8eef7", foreground=tenue,
+            font=("Segoe UI", 9), padding=(8, 5),
+        )
 
     def _crear_estado_visual(self) -> None:
         """Crea la barra superior y el estado inferior.
@@ -113,17 +204,25 @@ class AplicacionTk(tk.Tk):
         retorno: None.
         complejidad: O(1).
         """
-        encabezado = ttk.Frame(self, padding=8)
+        encabezado = ttk.Frame(self, style="Header.TFrame", padding=(18, 12))
         encabezado.pack(fill="x")
+        bloque_titulo = ttk.Frame(encabezado, style="Header.TFrame")
+        bloque_titulo.pack(side="left", fill="x", expand=True)
         ttk.Label(
-            encabezado,
-            text="Normalizador de Esquemas",
-            font=("Segoe UI", 16, "bold"),
-        ).pack(side="left")
+            bloque_titulo, text="Normalizador de Esquemas",
+            style="HeaderTitle.TLabel",
+        ).pack(anchor="w")
+        ttk.Label(
+            bloque_titulo,
+            text="Analiza dependencias funcionales y mejora tus tablas",
+            style="HeaderSubtitle.TLabel",
+        ).pack(anchor="w", pady=(2, 0))
 
-        pie = ttk.Frame(self, padding=6)
+        pie = ttk.Frame(self, style="Status.TFrame", padding=4)
         pie.pack(fill="x", side="bottom")
-        self.estado_label = ttk.Label(pie, text="Listo")
+        self.estado_label = ttk.Label(
+            pie, text="Listo", style="Status.TLabel"
+        )
         self.estado_label.pack(side="left")
 
     def _procesando(self, mensaje: str) -> None:
@@ -234,6 +333,7 @@ class AplicacionTk(tk.Tk):
         complejidad: O(n), n widgets básicos declarados.
         """
         cuaderno = ttk.Notebook(self)
+        self.cuaderno = cuaderno
         cuaderno.pack(fill="both", expand=True)
 
         self.pestana_conexion = ttk.Frame(cuaderno, padding=12)
@@ -282,7 +382,10 @@ class AplicacionTk(tk.Tk):
             entrada.grid(row=fila, column=1, sticky="w", padx=6, pady=4)
             self.conexion_campos[clave] = entrada
 
-        ttk.Button(formulario, text="Conectar", command=self.conectar).grid(
+        ttk.Button(
+            formulario, text="Conectar", command=self.conectar,
+            style="Accent.TButton",
+        ).grid(
             row=5, column=0, padx=6, pady=8, sticky="w"
         )
         ttk.Button(formulario, text="Listar tablas", command=self.listar_tablas).grid(
@@ -309,7 +412,7 @@ class AplicacionTk(tk.Tk):
 
         casos = ttk.LabelFrame(
             self.pestana_conexion,
-            text="Casos SQL",
+            text="Casos y archivos SQL",
         )
         casos.pack(fill="x", pady=(0, 8))
         ttk.Label(casos, text="Caso").grid(
@@ -327,9 +430,26 @@ class AplicacionTk(tk.Tk):
             casos,
             text="Cargar caso",
             command=self.cargar_caso_sql,
+            style="Accent.TButton",
         ).grid(row=0, column=2, padx=6, pady=6)
+        ttk.Button(
+            casos,
+            text="Importar archivo SQL…",
+            command=self.importar_archivo_sql,
+        ).grid(row=0, column=3, padx=6, pady=6)
 
-        self.lista_tablas = tk.Listbox(resultado, height=8)
+        self.lista_tablas = tk.Listbox(
+            resultado,
+            height=8,
+            background="#ffffff",
+            foreground="#172033",
+            selectbackground="#dbeafe",
+            selectforeground="#172033",
+            highlightthickness=1,
+            highlightbackground="#d8e1ee",
+            relief="flat",
+            font=("Segoe UI", 9),
+        )
         self.lista_tablas.pack(side="left", fill="both", expand=True, padx=6, pady=6)
         self.lista_tablas.bind("<<ListboxSelect>>", self._seleccionar_tabla)
 
@@ -393,17 +513,17 @@ class AplicacionTk(tk.Tk):
         self.texto_columnas.delete("1.0", tk.END)
         self.estado_label.configure(text="Desconectado")
 
-    def listar_tablas(self) -> None:
+    def listar_tablas(self) -> tuple[str, ...]:
         """Lista las tablas y deja la selección disponible.
 
         parámetros: ninguno.
-        retorno: None.
+        retorno: nombres de tablas disponibles, o tupla vacía si hubo error.
         complejidad: O(n log n), n tablas.
         """
         conexion = self.estado["conexion"]
         if conexion is None:
             self._error("Conecte primero al servidor MySQL.")
-            return
+            return ()
         self._procesando("Leyendo tablas...")
         try:
             tablas = listar_tablas(conexion)
@@ -411,11 +531,13 @@ class AplicacionTk(tk.Tk):
             for tabla in tablas:
                 self.lista_tablas.insert(tk.END, tabla)
             self.estado_label.configure(text=f"{len(tablas)} tablas encontradas")
+            return tablas
         except Exception as error:
             self._error(error)
+            return ()
 
     def cargar_caso_sql(self) -> None:
-        """Carga uno de los cinco scripts SQL definidos en scripts/.
+        """Carga uno de los scripts SQL definidos en scripts/.
 
         parámetros: ninguno.
         retorno: None.
@@ -429,22 +551,142 @@ class AplicacionTk(tk.Tk):
         try:
             resultado = ejecutar_caso(conexion, caso)
             self.estado["df"] = ()
+            self.estado["tabla"] = ""
+            self.estado["atributos"] = frozenset()
+            self.estado["tipos"] = {}
             self.estado["tabla_confirmada"] = ""
             self.estado["atributos_confirmados"] = frozenset()
             self.estado["tipos_confirmados"] = {}
             self.estado["pk_confirmada"] = frozenset()
             self.estado["fk_confirmadas"] = frozenset()
             self.estado["aks_confirmadas"] = ()
+            self.estado["relaciones_fk"] = ()
             self.estado["resultados"] = {}
             self.entrada_tabla_df.delete(0, tk.END)
+            self.entrada_df_texto.delete(0, tk.END)
             self.entrada_tabla_analisis.delete(0, tk.END)
             self.texto_df.delete("1.0", tk.END)
             self.texto_analisis.delete("1.0", tk.END)
-            self.listar_tablas()
+            self.texto_sql.delete("1.0", tk.END)
+            self._propuesta_visible = None
+            self.canvas_tabla.delete("all")
+            tablas = self.listar_tablas()
+            tabla_esperada = (
+                TABLA_CARGADA_SQL.get(caso)
+                or TABLA_ORIGEN_CASO.get(caso)
+            )
+            if not tabla_esperada or tabla_esperada not in tablas:
+                raise RuntimeError(
+                    f"El caso {caso} se ejecutó, pero no aparece la tabla "
+                    f"{tabla_esperada!r} en la base conectada "
+                    f"{conexion.database!r}. Verifique los permisos y vuelva "
+                    "a cargar el caso."
+                )
+            indice = tablas.index(tabla_esperada)
+            self.lista_tablas.selection_clear(0, tk.END)
+            self.lista_tablas.selection_set(indice)
+            self.lista_tablas.activate(indice)
+            self.lista_tablas.see(indice)
+            self._seleccionar_tabla()
+            if self.estado["tabla"] != tabla_esperada:
+                raise RuntimeError(
+                    f"No se pudieron leer las columnas de {tabla_esperada!r}."
+                )
             self.estado_label.configure(
-                text=f"Caso SQL cargado: {caso}"
+                text=f"Caso SQL cargado; tabla seleccionada: {tabla_esperada}"
             )
         except Exception as error:
+            self._error(error)
+
+    def importar_archivo_sql(self) -> None:
+        """Importa SQL del usuario en la base activa y reconoce sus tablas."""
+        conexion = self.estado["conexion"]
+        if conexion is None:
+            self._error("Conecte primero a la base configurada en .env.")
+            return
+        ruta = filedialog.askopenfilename(
+            parent=self,
+            title="Seleccionar archivo SQL",
+            filetypes=(("Archivos SQL", "*.sql"), ("Todos los archivos", "*.*")),
+        )
+        if not ruta:
+            return
+
+        try:
+            archivo = preparar_archivo_sql(ruta)
+            aviso = (
+                f"Se ejecutarán {len(archivo.sentencias)} instrucciones de "
+                f"{Path(ruta).name} en la base {conexion.database!r}."
+            )
+            if archivo.directivas_omitidas:
+                aviso += (
+                    f"\n\nSe omitirán {archivo.directivas_omitidas} directivas "
+                    "de base o sesión para respetar la conexión actual."
+                )
+            if archivo.sentencias_peligrosas:
+                aviso += (
+                    "\n\nEl archivo contiene operaciones que pueden borrar, "
+                    "reemplazar o alterar datos, como DROP, TRUNCATE, DELETE o ALTER."
+                )
+            aviso += "\n\n¿Desea continuar?"
+            if not messagebox.askyesno(
+                "Importar archivo SQL", aviso, parent=self
+            ):
+                return
+
+            tablas_antes = set(listar_tablas(conexion))
+            self.estado["df"] = ()
+            self.estado["tabla"] = ""
+            self.estado["atributos"] = frozenset()
+            self.estado["tipos"] = {}
+            self.estado["tabla_confirmada"] = ""
+            self.estado["atributos_confirmados"] = frozenset()
+            self.estado["tipos_confirmados"] = {}
+            self.estado["pk_confirmada"] = frozenset()
+            self.estado["fk_confirmadas"] = frozenset()
+            self.estado["aks_confirmadas"] = ()
+            self.estado["relaciones_fk"] = ()
+            self.estado["resultados"] = {}
+            self.entrada_tabla_df.delete(0, tk.END)
+            self.entrada_df_texto.delete(0, tk.END)
+            self.entrada_tabla_analisis.delete(0, tk.END)
+            self.texto_df.delete("1.0", tk.END)
+            self.texto_analisis.delete("1.0", tk.END)
+            self._propuesta_visible = None
+            self.canvas_tabla.delete("all")
+            self._procesando(f"Importando {Path(ruta).name}...")
+            resultado = ejecutar_archivo_sql(conexion, archivo)
+            tablas = self.listar_tablas()
+            nuevas = sorted(set(tablas) - tablas_antes)
+            if len(nuevas) == 1:
+                tabla = nuevas[0]
+                indice = tablas.index(tabla)
+                self.lista_tablas.selection_clear(0, tk.END)
+                self.lista_tablas.selection_set(indice)
+                self.lista_tablas.activate(indice)
+                self.lista_tablas.see(indice)
+                self._seleccionar_tabla()
+                if self.confirmar_tabla():
+                    self.cuaderno.select(self.pestana_df)
+                    self.estado_label.configure(
+                        text=f"Archivo importado; tabla lista para analizar: {tabla}"
+                    )
+            elif nuevas:
+                self.estado_label.configure(
+                    text=(
+                        f"Archivo importado; {len(nuevas)} tablas nuevas. "
+                        "Selecciona y confirma la tabla que quieres analizar."
+                    )
+                )
+            else:
+                self.estado_label.configure(
+                    text=(
+                        f"Archivo importado: {resultado['ejecutadas']} instrucciones. "
+                        "Selecciona y confirma una tabla de la lista actualizada."
+                    )
+                )
+        except Exception as error:
+            self.listar_tablas()
             self._error(error)
 
     def _seleccionar_tabla(self, evento=None) -> None:
@@ -461,6 +703,20 @@ class AplicacionTk(tk.Tk):
         tabla = self.lista_tablas.get(seleccion[0])
         try:
             columnas = listar_columnas(conexion, tabla)
+            if tabla != self.estado["tabla_confirmada"]:
+                self.estado["df"] = ()
+                self.estado["tabla_confirmada"] = ""
+                self.estado["atributos_confirmados"] = frozenset()
+                self.estado["tipos_confirmados"] = {}
+                self.estado["pk_confirmada"] = frozenset()
+                self.estado["fk_confirmadas"] = frozenset()
+                self.estado["aks_confirmadas"] = ()
+                self.estado["resultados"] = {}
+                self.texto_df.delete("1.0", tk.END)
+                self.texto_analisis.delete("1.0", tk.END)
+                self.entrada_df_texto.delete(0, tk.END)
+                self._propuesta_visible = None
+                self.canvas_tabla.delete("all")
             self.estado["tabla"] = tabla
             self.estado["atributos"] = frozenset(
                 columna["nombre"] for columna in columnas
@@ -484,6 +740,15 @@ class AplicacionTk(tk.Tk):
             self.estado_label.configure(text=f"Tabla seleccionada: {tabla}")
         except Exception as error:
             self._error(error)
+
+    @staticmethod
+    def _caso_para_tabla(tabla: str) -> str | None:
+        """Encuentra el caso SQL por el nombre real de su tabla de origen."""
+        return next(
+            (caso for caso, origen in TABLA_ORIGEN_CASO.items()
+             if origen == tabla),
+            None,
+        )
 
     def _crear_df(self) -> None:
         """Construye la pestaña editable de dependencias.
@@ -522,6 +787,7 @@ class AplicacionTk(tk.Tk):
             superior,
             text="Agregar/establecer",
             command=self.establecer_df,
+            style="Accent.TButton",
         ).grid(row=2, column=0, padx=6, pady=6)
         ttk.Button(
             superior,
@@ -530,6 +796,10 @@ class AplicacionTk(tk.Tk):
         ).grid(row=2, column=1, padx=6, pady=6, sticky="w")
 
         self.texto_df = TextoSoloLectura(self.pestana_df, height=20)
+        self.texto_df.configure(
+            font=("Segoe UI", 9), background="#ffffff", foreground="#334155",
+            selectbackground="#dbeafe", padx=10, pady=8, borderwidth=0,
+        )
         self.texto_df.configure(state="disabled")
         self.texto_df.pack(fill="both", expand=True, padx=6, pady=6)
 
@@ -552,29 +822,52 @@ class AplicacionTk(tk.Tk):
         if not tabla:
             self._error("Indique una tabla.")
             return
-        if not atributos:
-            conexion = self.estado["conexion"]
-            if conexion is None:
-                self._error("Seleccione una tabla después de conectar.")
+        conexion = self.estado["conexion"]
+        if conexion is None:
+            self._error("Conecte a la base antes de cargar las DF.")
+            return
+        if tabla != self.estado["tabla"] or not atributos:
+            try:
+                columnas = listar_columnas(conexion, tabla)
+            except Exception as error:
+                self._error(error)
                 return
-            columnas = listar_columnas(conexion, tabla)
+            if tabla != self.estado["tabla"]:
+                self.estado["df"] = ()
+                self.estado["resultados"] = {}
+                self.estado["tabla_confirmada"] = ""
+                self.estado["atributos_confirmados"] = frozenset()
+                self.estado["tipos_confirmados"] = {}
+                self.estado["pk_confirmada"] = frozenset()
+                self.estado["fk_confirmadas"] = frozenset()
+                self.estado["aks_confirmadas"] = ()
+                self.entrada_tabla_analisis.delete(0, tk.END)
+                self.entrada_tabla_analisis.insert(0, tabla)
             atributos = frozenset(
                 columna["nombre"] for columna in columnas
             )
+            self.estado["tabla"] = tabla
             self.estado["atributos"] = atributos
             self.estado["tipos"] = {
                 columna["nombre"]: columna["tipo"] for columna in columnas
             }
         try:
+            validar_dependencias(self.entrada_df_texto.get(), atributos)
             df = parsear_dependencias(self.entrada_df_texto.get(), atributos)
+            self.estado["resultados"] = {}
+            self.texto_analisis.delete("1.0", tk.END)
+            self.canvas_tabla.delete("all")
             self.estado["tabla"] = tabla
             self.estado["df"] = df
-            self.estado["tabla_confirmada"] = tabla
-            self.estado["atributos_confirmados"] = atributos
+            if self.estado["tabla_confirmada"] == tabla:
+                self.estado["atributos_confirmados"] = atributos
             self.texto_df.delete("1.0", tk.END)
             for dependencia in df:
                 self.texto_df.insert(tk.END, f"{dependencia}\n")
-            self.estado_label.configure(text=f"{len(df)} DF establecidas")
+            texto_estado = f"{len(df)} DF establecidas"
+            if self.estado["tabla_confirmada"] != tabla:
+                texto_estado += " (tabla aún sin confirmar)"
+            self.estado_label.configure(text=texto_estado)
         except Exception as error:
             self._error(error)
 
@@ -634,6 +927,7 @@ class AplicacionTk(tk.Tk):
             formulario,
             text="Calcular",
             command=self.calcular_analisis,
+            style="Accent.TButton",
         ).grid(row=4, column=0, padx=6, pady=6)
         ttk.Button(
             formulario,
@@ -645,23 +939,33 @@ class AplicacionTk(tk.Tk):
             text="Dibujar propuesta",
             command=self.dibujar_propuesta_normalizacion,
         ).grid(row=4, column=2, padx=6, pady=6)
-        ttk.Button(
-            formulario,
-            text="Aplicar propuesta",
-            command=self.aplicar_propuesta_normalizacion,
-        ).grid(row=4, column=3, padx=6, pady=6)
-
         dividido = ttk.Panedwindow(self.pestana_analisis, orient="horizontal")
         dividido.pack(fill="both", expand=True, padx=6, pady=6)
 
         panel_texto = ttk.Frame(dividido)
         panel_visual = ttk.Frame(dividido)
         dividido.add(panel_texto, weight=1)
-        dividido.add(panel_visual, weight=2)
+        dividido.add(panel_visual, weight=1)
 
-        self.texto_analisis = TextoSoloLectura(panel_texto, height=24)
+        self.texto_analisis = TextoSoloLectura(
+            panel_texto, height=24, wrap=tk.WORD
+        )
+        self.texto_analisis.configure(font=("Segoe UI", 9))
+        self.texto_analisis.tag_configure(
+            "encabezado", font=("Segoe UI", 10, "bold"), foreground="#174a6e"
+        )
+        self.texto_analisis.tag_configure(
+            "subtitulo", font=("Segoe UI", 9, "bold"), spacing1=5
+        )
         self.texto_analisis.configure(state="disabled")
-        self.texto_analisis.pack(fill="both", expand=True)
+        scroll_texto = ttk.Scrollbar(
+            panel_texto, orient="vertical", command=self.texto_analisis.yview
+        )
+        self.texto_analisis.configure(yscrollcommand=scroll_texto.set)
+        self.texto_analisis.grid(row=0, column=0, sticky="nsew")
+        scroll_texto.grid(row=0, column=1, sticky="ns")
+        panel_texto.grid_rowconfigure(0, weight=1)
+        panel_texto.grid_columnconfigure(0, weight=1)
 
         canvas_frame = ttk.Frame(panel_visual)
         canvas_frame.pack(fill="both", expand=True)
@@ -670,28 +974,34 @@ class AplicacionTk(tk.Tk):
             canvas_frame,
             width=520,
             height=360,
-            background="#f7f7f7",
+            background="#ffffff",
             highlightthickness=1,
             highlightbackground="#b8b8b8",
         )
+        self.canvas_tabla.bind("<Configure>", self._redimensionar_propuesta)
+        scroll_canvas = ttk.Scrollbar(
+            canvas_frame, orient="vertical", command=self.canvas_tabla.yview
+        )
+        self.canvas_tabla.configure(yscrollcommand=scroll_canvas.set)
         canvas_frame.grid_rowconfigure(0, weight=1)
         canvas_frame.grid_columnconfigure(0, weight=1)
         self.canvas_tabla.grid(row=0, column=0, sticky="nsew")
+        scroll_canvas.grid(row=0, column=1, sticky="ns")
 
-    def confirmar_tabla(self) -> None:
+    def confirmar_tabla(self) -> bool:
         """Confirma que la tabla existe y dibuja sus columnas y filas.
 
         Definición formal: la tabla debe pertenecer al esquema MySQL conectado
         y sus atributos deben coincidir con INFORMATION_SCHEMA.
         parámetros: ninguno.
-        retorno: None.
+        retorno: True si se confirmó; False si falló.
         complejidad: O(n log n) para listar/validar y O(r·n) para leer filas,
         con un máximo de 100 filas mostradas.
         """
         conexion = self.estado["conexion"]
         if conexion is None:
             self._error("Conecte primero al servidor MySQL.")
-            return
+            return False
         try:
             tabla = self._validar_identificador(
                 self.entrada_tabla_analisis.get(),
@@ -705,12 +1015,14 @@ class AplicacionTk(tk.Tk):
                 )
             claves = listar_claves(conexion, tabla)
 
-            tabla_anterior = self.estado["tabla"]
+            tabla_anterior = self.estado["tabla_confirmada"]
             if tabla_anterior and tabla_anterior != tabla:
                 self.estado["df"] = ()
                 self.texto_df.delete("1.0", tk.END)
                 self.texto_analisis.delete("1.0", tk.END)
                 self.estado["resultados"] = {}
+                self.entrada_df_texto.delete(0, tk.END)
+                self.canvas_tabla.delete("all")
 
             atributos = frozenset(
                 columna["nombre"] for columna in columnas
@@ -727,6 +1039,10 @@ class AplicacionTk(tk.Tk):
             self.estado["pk_confirmada"] = claves["pk"]
             self.estado["fk_confirmadas"] = claves["fk"]
             self.estado["aks_confirmadas"] = claves["aks"]
+            self.estado["relaciones_fk"] = ()
+            caso_tabla = self._caso_para_tabla(tabla)
+            if caso_tabla:
+                self.selector_caso.set(caso_tabla)
 
             nombres = self._ordenar_nombres_por_clave(
                 sorted(atributos),
@@ -760,8 +1076,10 @@ class AplicacionTk(tk.Tk):
             self.estado_label.configure(
                 text=f"Tabla '{tabla}' confirmada"
             )
+            return True
         except Exception as error:
             self._error(error)
+            return False
 
     @staticmethod
     def _ordenar_nombres_por_clave(
@@ -807,6 +1125,7 @@ class AplicacionTk(tk.Tk):
             fk,
             aks,
         )
+        self._propuesta_visible = None
         canvas = self.canvas_tabla
         canvas.delete("all")
         canvas.create_text(
@@ -866,16 +1185,20 @@ class AplicacionTk(tk.Tk):
         contenedor.grid_rowconfigure(0, weight=1)
         contenedor.grid_columnconfigure(0, weight=1)
 
+        ancho_vista = max(240, canvas.winfo_width() - 28)
+        alto_vista = max(160, canvas.winfo_height() - 78)
         canvas_window = canvas.create_window(
             12,
             58,
             anchor="nw",
-            width=500,
-            height=280,
+            width=ancho_vista,
+            height=alto_vista,
             window=contenedor,
         )
         canvas.itemconfigure(canvas_window)
-        canvas.configure(scrollregion=(0, 0, 530, 350))
+        canvas.configure(
+            scrollregion=(0, 0, ancho_vista + 24, alto_vista + 68)
+        )
 
     def dibujar_propuesta_normalizacion(self) -> None:
         """Dibuja las relaciones propuestas por síntesis 3FN."""
@@ -886,29 +1209,47 @@ class AplicacionTk(tk.Tk):
                 "Confirme la tabla y establezca las DF antes de proponer."
             )
             return
-        nombre_caso = self.selector_caso.get().strip()
-        propuesta = propuesta_para(nombre_caso, atributos, df)
+        tabla_confirmada = self.estado["tabla_confirmada"]
+        nombre_caso = self._caso_para_tabla(tabla_confirmada)
+        propuesta = (
+            propuesta_para(nombre_caso, atributos, df)
+            if nombre_caso
+            else propuesta_nativa(tabla_confirmada, atributos, df)
+        )
         self._dibujar_propuesta(propuesta)
 
     def _dibujar_propuesta(
         self,
         propuesta,
     ) -> None:
-        """Representa entidades, claves y relaciones normalizadas."""
+        """Representa una propuesta adaptada al ancho real del lienzo."""
+        self._propuesta_visible = propuesta
+        self._pintar_propuesta(propuesta)
+
+    def _redimensionar_propuesta(self, evento=None) -> None:
+        """Redibuja las tarjetas cuando cambia el ancho del panel."""
+        if self._propuesta_visible is not None:
+            self._pintar_propuesta(self._propuesta_visible)
+
+    def _pintar_propuesta(self, propuesta) -> None:
         canvas = self.canvas_tabla
         canvas.delete("all")
+        ancho = max(320, canvas.winfo_width())
+        margen = 18
+        ancho_tarjeta = ancho - margen * 2
+        separacion = 34
+        sin_descomposicion = len(propuesta.entidades) == 1
         canvas.create_text(
-            12,
-            18,
+            margen,
+            16,
             anchor="nw",
-            text="Propuesta normalizada",
+            text=("Diseño actual · sin descomposición"
+                  if sin_descomposicion else "Propuesta normalizada"),
             font=("Segoe UI", 11, "bold"),
         )
-        posiciones: dict[str, tuple[int, int]] = {}
-        for indice, entidad in enumerate(propuesta.entidades, start=1):
-            x = 12 + ((indice - 1) % 2) * 250
-            y = 55 + ((indice - 1) // 2) * 145
-            posiciones[entidad.nombre] = (x, y)
+        tarjetas = {}
+        y = 48
+        for entidad in propuesta.entidades:
             filas = []
             for atributo in entidad.atributos:
                 rol = []
@@ -924,148 +1265,79 @@ class AplicacionTk(tk.Tk):
                     rol.append("AK")
                 sufijo = f" [{'/'.join(rol)}]" if rol else ""
                 filas.append(f"{atributo}{sufijo}")
-
+            alto = max(88, 54 + len(filas) * 18)
+            tarjetas[entidad.nombre] = {
+                "x": margen, "y": y, "w": ancho_tarjeta, "h": alto,
+            }
             canvas.create_rectangle(
-                x,
+                margen,
                 y,
-                x + 230,
-                y + 105,
-                fill="#eef4fb",
-                outline="#6b7280",
+                margen + ancho_tarjeta,
+                y + alto,
+                fill="#ecfdf5" if sin_descomposicion else "#eef4fb",
+                outline="#15803d" if sin_descomposicion else "#6b7280",
             )
             canvas.create_text(
-                x + 12,
+                margen + 12,
                 y + 12,
                 anchor="nw",
                 text=entidad.nombre,
                 font=("Segoe UI", 10, "bold"),
             )
             canvas.create_text(
-                x + 12,
-                y + 35,
+                margen + 12,
+                y + 36,
                 anchor="nw",
                 text="\n".join(filas),
                 font=("Courier", 9),
-                width=205,
+                width=ancho_tarjeta - 24,
             )
+            y += alto + separacion
+
+        # Las conexiones salen por el margen izquierdo para no cruzar tarjetas.
+        indices_por_par = {}
         for relacion in propuesta.relaciones:
-            if relacion.origen not in posiciones or relacion.destino not in posiciones:
+            if relacion.origen not in tarjetas or relacion.destino not in tarjetas:
                 continue
-            origen_x, origen_y = posiciones[relacion.origen]
-            destino_x, destino_y = posiciones[relacion.destino]
-            origen_centro = (origen_x + 230, origen_y + 52)
-            destino_centro = (destino_x, destino_y + 52)
+            origen = tarjetas[relacion.origen]
+            destino = tarjetas[relacion.destino]
+            grupo = (relacion.origen, relacion.destino)
+            desplazamiento = indices_por_par.get(grupo, 0) * 8
+            indices_por_par[grupo] = indices_por_par.get(grupo, 0) + 1
+            x_ruta = margen - 7 - desplazamiento
+            origen_y = origen["y"] + origen["h"] / 2
+            destino_y = destino["y"] + destino["h"] / 2
             canvas.create_line(
-                origen_centro[0],
-                origen_centro[1],
-                destino_centro[0],
-                destino_centro[1],
+                margen, origen_y,
+                x_ruta, origen_y,
+                x_ruta, destino_y,
+                margen, destino_y,
                 fill="#2563eb",
                 width=2,
                 arrow=tk.LAST,
             )
+        if propuesta.relaciones:
+            y += 4
             canvas.create_text(
-                (origen_centro[0] + destino_centro[0]) // 2,
-                (origen_centro[1] + destino_centro[1]) // 2 - 8,
-                text=f"{relacion.atributo_origen} -> "
-                     f"{relacion.atributo_destino}",
-                fill="#1d4ed8",
-                font=("Segoe UI", 8),
+                margen, y,
+                anchor="nw",
+                text="Relaciones",
+                font=("Segoe UI", 9, "bold"),
             )
+            y += 20
+            for relacion in propuesta.relaciones:
+                canvas.create_text(
+                    margen + 4, y,
+                    anchor="nw",
+                    text=(f"{relacion.origen}.{relacion.atributo_origen}  →  "
+                          f"{relacion.destino}.{relacion.atributo_destino}"),
+                    fill="#1d4ed8",
+                    font=("Segoe UI", 8),
+                )
+                y += 18
         canvas.configure(
-            scrollregion=(
-                0,
-                0,
-                520,
-                55 + len(propuesta.entidades) * 155,
-            )
+            scrollregion=(0, 0, ancho, y + 20)
         )
-
-    def aplicar_propuesta_normalizacion(self) -> None:
-        """Crea las tablas 3FN propuestas y migra datos sin eliminar el origen."""
-        try:
-            conexion = self.estado["conexion"]
-            tabla_origen = self.estado["tabla_confirmada"]
-            atributos = self.estado["atributos_confirmados"]
-            df = self.estado["df"]
-            if conexion is None or not tabla_origen:
-                raise ValueError("Confirme una tabla cargada desde scripts/.")
-            if not atributos or not df:
-                raise ValueError("Establezca las DF en la pestaña DF.")
-
-            nombre_caso = self.selector_caso.get().strip()
-            propuesta = propuesta_para(nombre_caso, atributos, df)
-            tipos = self.estado["tipos_confirmados"]
-            cursor = conexion.cursor()
-            sentencias: list[str] = []
-            try:
-                conexion.start_transaction()
-                for entidad in propuesta.entidades:
-                    nombre = entidad.nombre
-                    columnas = list(entidad.atributos)
-                    definiciones = []
-                    for columna in columnas:
-                        tipo = tipos.get(columna, "VARCHAR(255)")
-                        definiciones.append(
-                            f"{escapar_identificador(columna)} {tipo}"
-                        )
-                    if entidad.pk:
-                        definiciones.append(
-                            "PRIMARY KEY (" +
-                            ", ".join(
-                                escapar_identificador(columna)
-                                for columna in entidad.pk
-                            ) +
-                            ")"
-                        )
-                    for atributo, tabla_ref, atributo_ref in entidad.fk:
-                        definiciones.append(
-                            f"FOREIGN KEY ({escapar_identificador(atributo)}) "
-                            f"REFERENCES {escapar_identificador(tabla_ref)} "
-                            f"({escapar_identificador(atributo_ref)})"
-                        )
-                    for atributo in entidad.ak:
-                        definiciones.append(
-                            f"UNIQUE KEY ({escapar_identificador(atributo)})"
-                        )
-                    sentencias.append(
-                        f"CREATE TABLE IF NOT EXISTS "
-                        f"{escapar_identificador(nombre)} "
-                        f"({', '.join(definiciones)})"
-                    )
-                    cursor.execute(sentencias[-1])
-                    cursor.execute(
-                        f"DELETE FROM {escapar_identificador(nombre)}"
-                    )
-                    seleccion = ", ".join(
-                        escapar_identificador(columna)
-                        for columna in columnas
-                    )
-                    if columnas:
-                        cursor.execute(
-                            f"INSERT INTO {escapar_identificador(nombre)} "
-                            f"({seleccion}) "
-                            f"SELECT DISTINCT {seleccion} "
-                            f"FROM {escapar_identificador(tabla_origen)}"
-                        )
-                conexion.commit()
-            except Exception:
-                conexion.rollback()
-                raise
-            finally:
-                cursor.close()
-
-            self._dibujar_propuesta(propuesta)
-            self.estado["resultados"]["propuesta"] = {
-                "entidades": propuesta.entidades,
-                "relaciones": propuesta.relaciones,
-                "sentencias": tuple(sentencias),
-            }
-            self.estado_label.configure(
-                text=f"Propuesta aplicada: {len(relaciones)} tablas creadas"
-            )
-        except Exception as error:
-            self._error(error)
 
     def calcular_analisis(self) -> None:
         """Calcula cierre, claves, cobertura y formas normales.
@@ -1077,6 +1349,9 @@ class AplicacionTk(tk.Tk):
         tabla = self.entrada_tabla_analisis.get().strip()
         atributos_confirmados = self.estado["atributos_confirmados"]
         tabla_confirmada = self.estado["tabla_confirmada"]
+        if tabla_confirmada and tabla != tabla_confirmada:
+            self._error("Confirme la tabla seleccionada antes de analizarla.")
+            return
         atributos = (
             atributos_confirmados
             if tabla_confirmada and tabla == tabla_confirmada
@@ -1087,8 +1362,10 @@ class AplicacionTk(tk.Tk):
         texto_df = self.entrada_df_texto.get().strip()
         if texto_df:
             try:
+                validar_dependencias(texto_df, atributos)
                 df = parsear_dependencias(texto_df, atributos)
                 self.estado["df"] = df
+                self.estado["resultados"].pop("propuesta", None)
             except Exception as error:
                 self._error(error)
                 return
@@ -1100,6 +1377,7 @@ class AplicacionTk(tk.Tk):
             return
         try:
             x = self.entrada_cierre.get().strip()
+            validar_consulta_cierre(x, atributos)
             if "->" in x:
                 izquierdo, derecho = x.split("->", 1)
                 x_atributos = self._parsear_x(izquierdo)
@@ -1164,59 +1442,85 @@ class AplicacionTk(tk.Tk):
                 ),
             }
 
-            self.texto_analisis.delete("1.0", tk.END)
-            self.texto_analisis.insert(tk.END, f"Cierre(X): {sorted(cierre_resultado)}\n")
+            def lista_nombres(valores) -> str:
+                ordenados = sorted(valores)
+                if not ordenados:
+                    return "ninguno"
+                if len(ordenados) == 1:
+                    return ordenados[0]
+                return ", ".join(ordenados[:-1]) + " y " + ordenados[-1]
+
+            def lista_claves(conjuntos) -> str:
+                return "; ".join(
+                    lista_nombres(conjunto) for conjunto in conjuntos
+                ) or "ninguna declarada"
+
+            secciones = [("RESUMEN", f"Tabla analizada: {tabla}.")]
+            if x_atributos:
+                detalle_cierre = (
+                    f"a partir de {lista_nombres(x_atributos)} se pueden "
+                    f"conocer {lista_nombres(cierre_resultado)}."
+                )
+            else:
+                detalle_cierre = "No se indicó un conjunto de atributos X."
             if y_atributos:
-                resultado_implica = "Sí" if implicacion else "No"
-                self.texto_analisis.insert(
-                    tk.END,
-                    f"Implica ({', '.join(sorted(x_atributos))}) "
-                    f"-> ({', '.join(sorted(y_atributos))}): "
-                    f"{resultado_implica}\n",
+                detalle_cierre += (
+                    f" La pregunta «{lista_nombres(x_atributos)} determina "
+                    f"{lista_nombres(y_atributos)}»: "
+                    f"{'sí' if implicacion else 'no'}."
                 )
-            self.texto_analisis.insert(
-                tk.END,
-                f"PK declarada: {[sorted(k) for k in ((pk,) if pk else ())]}\n",
+            secciones.append(("CIERRE E IMPLICACIÓN", detalle_cierre))
+            secciones.append((
+                "CLAVES",
+                f"Clave principal: {lista_nombres(pk) if pk else 'ninguna declarada'}. "
+                f"Combinaciones que identifican una fila: {lista_claves(claves)}.",
+            ))
+            secciones.append((
+                "FORMAS NORMALES",
+                "1FN — exige un solo valor por casilla (valores atómicos): "
+                f"{'cumple' if reportes['1fn']['cumple'] else 'no cumple'}.\n"
+                "2FN — exige que los datos no clave dependan de toda la clave, "
+                "no solo de una parte: "
+                f"{'cumple' if reportes['2fn']['cumple'] else 'no cumple; hay una dependencia parcial'}.\n"
+                "3FN — exige que el determinante sea superclave o que cada dato "
+                "determinado forme parte de una clave candidata: "
+                f"{'cumple' if reportes['3fn']['cumple'] else 'no cumple; hay una dependencia que no satisface ninguna condición'}.\n"
+                "BCNF — exige que todo determinante de una dependencia no "
+                "trivial sea superclave, sin la excepción de 3FN: "
+                f"{'cumple' if reportes['bcnf']['cumple'] else 'no cumple; hay un determinante que no identifica la fila completa'}."
+            ))
+            self.texto_analisis.delete("1.0", tk.END)
+            nombre_caso = self._caso_para_tabla(tabla)
+            requiere_propuesta = (
+                not reportes["3fn"]["cumple"]
+                or (nombre_caso == "caso_3_bcnf" and not reportes["bcnf"]["cumple"])
             )
-            self.texto_analisis.insert(
-                tk.END,
-                f"FK declaradas: {sorted(fk)}\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                f"AK declaradas: {[sorted(k) for k in aks]}\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                f"Claves candidatas válidas: {[sorted(k) for k in claves]}\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                "Atributos primos: "
-                f"{sorted(primos)} "
-                "(pertenecen a alguna PK/AK candidata)\n",
-            )
-            self.texto_analisis.insert(
-                tk.END,
-                f"Cobertura mínima: {[str(d) for d in cobertura]}\n",
-            )
-            for nombre, reporte in reportes.items():
-                self.texto_analisis.insert(
-                    tk.END,
-                    f"{nombre.upper()}: {reporte['mensaje']}\n",
+            if requiere_propuesta:
+                propuesta = (
+                    propuesta_para(nombre_caso, atributos, df)
+                    if nombre_caso
+                    else propuesta_nativa(tabla, atributos, df)
                 )
-            if not reportes["3fn"]["cumple"]:
-                relaciones = sintetizar_3fn(atributos, df)
                 self.estado["resultados"]["propuesta"] = {
-                    "relaciones": relaciones,
+                    "entidades": propuesta.entidades,
+                    "relaciones": propuesta.relaciones,
                     "sentencias": (),
                 }
+                secciones.append((
+                    "CONCLUSIÓN",
+                    "Las DF ingresadas requieren descomposición. Puedes elegir "
+                    "«Dibujar propuesta» para ver el resultado calculado por el normalizador.",
+                ))
+            else:
+                secciones.append((
+                    "CONCLUSIÓN",
+                    "La tabla no requiere descomposición según las formas normales evaluadas.",
+                ))
+            for subtitulo, contenido in secciones:
                 self.texto_analisis.insert(
-                    tk.END,
-                    "La tabla no cumple 3FN; propuesta disponible "
-                    "en Dibujar/Aplicar propuesta.\n",
+                    tk.END, subtitulo + "\n", "encabezado"
                 )
-                self._dibujar_propuesta(relaciones)
+                self.texto_analisis.insert(tk.END, contenido + "\n\n")
             self.estado["resultados"]["analisis"] = {
                 "cierre": cierre_resultado,
                 "claves": claves,
@@ -1237,8 +1541,10 @@ class AplicacionTk(tk.Tk):
         """
         self.entrada_cierre.delete(0, tk.END)
         self.texto_analisis.delete("1.0", tk.END)
+        self._propuesta_visible = None
         self.canvas_tabla.delete("all")
         self.estado["resultados"].pop("analisis", None)
+        self.estado["resultados"].pop("propuesta", None)
         self.estado_label.configure(text="Análisis limpiado")
 
     def _crear_sql(self) -> None:
@@ -1252,13 +1558,9 @@ class AplicacionTk(tk.Tk):
         controles.pack(fill="x")
         ttk.Button(
             controles,
-            text="Cargar caso de demostración",
-            command=self.cargar_demo,
-        ).pack(side="left", padx=6, pady=6)
-        ttk.Button(
-            controles,
             text="Generar propuesta",
             command=self.generar_propuesta_sql,
+            style="Accent.TButton",
         ).pack(side="left", padx=6, pady=6)
         ttk.Button(
             controles,
@@ -1269,10 +1571,11 @@ class AplicacionTk(tk.Tk):
             controles,
             text="Ejecutar",
             command=lambda: self.ejecutar_sql(solo_mostrar=False),
+            style="Accent.TButton",
         ).pack(side="left", padx=6, pady=6)
         ttk.Button(
             controles,
-            text="Actualizar propuesta",
+            text="Regenerar SQL",
             command=self.generar_propuesta_sql,
         ).pack(side="left", padx=6, pady=6)
         ttk.Button(
@@ -1282,37 +1585,12 @@ class AplicacionTk(tk.Tk):
         ).pack(side="left", padx=6, pady=6)
 
         self.texto_sql = TextoSoloLectura(self.pestana_sql, height=24)
+        self.texto_sql.configure(
+            font=("Consolas", 9), background="#ffffff", foreground="#334155",
+            selectbackground="#dbeafe", padx=10, pady=8, borderwidth=0,
+        )
         self.texto_sql.configure(state="disabled")
         self.texto_sql.pack(fill="both", expand=True, padx=6, pady=6)
-
-    def cargar_demo(self) -> None:
-        """Carga pedidos_planos y sus DF sin ejecutar SQL.
-
-        parámetros: ninguno.
-        retorno: None.
-        complejidad: O(n), n DF declaradas.
-        """
-        atributos = frozenset({
-            "id_pedido", "id_cliente", "nombre_cliente", "ciudad_cliente",
-            "id_producto", "nombre_producto", "precio", "cantidad",
-        })
-        df = (
-            DF("id_cliente", "nombre_cliente,ciudad_cliente"),
-            DF("id_producto", "nombre_producto,precio"),
-            DF("id_pedido", "id_cliente"),
-            DF("id_pedido,id_producto", "cantidad"),
-        )
-        self.estado["tabla"] = "pedidos_planos"
-        self.estado["atributos"] = atributos
-        self.estado["df"] = df
-        self.entrada_tabla_df.delete(0, tk.END)
-        self.entrada_tabla_df.insert(0, "pedidos_planos")
-        self.entrada_tabla_analisis.delete(0, tk.END)
-        self.entrada_tabla_analisis.insert(0, "pedidos_planos")
-        self.texto_df.delete("1.0", tk.END)
-        for dependencia in df:
-            self.texto_df.insert(tk.END, f"{dependencia}\n")
-        self.estado_label.configure(text="Caso de demostración cargado")
 
     def limpiar_sql(self) -> None:
         """Borra el SQL mostrado y elimina la propuesta almacenada.
@@ -1323,34 +1601,82 @@ class AplicacionTk(tk.Tk):
         """
         self.texto_sql.delete("1.0", tk.END)
         self.estado["resultados"].pop("sql", None)
+        self.estado["resultados"].pop("sql_caso", None)
         self.estado_label.configure(text="Salida SQL limpiada")
 
     def generar_propuesta_sql(self) -> None:
-        """Genera 3FN/BCNF, tableau y SQL para el caso activo.
+        """Genera SQL de caso publicado o desde una síntesis nativa.
 
         parámetros: ninguno.
         retorno: None.
         complejidad: depende de descomposición y tableau.
         """
-        atributos = self.estado["atributos"]
-        df = self.estado["df"]
-        if not atributos or not df:
-            self._error("Cargue el caso de demostración o establezca DF.")
-            return
-        self._procesando("Generando descomposición...")
+        tabla_origen = self.estado["tabla_confirmada"]
+        nombre_caso = self._caso_para_tabla(tabla_origen)
         try:
-            tresfn = sintetizar_3fn(atributos, df)
-            bcnf = descomponer_bcnf(atributos, df)
-            del tresfn
-            sentencias = generar_migracion_demo()
+            if nombre_caso:
+                sentencias = generar_migracion_caso(nombre_caso, tabla_origen)
+                nombres_destino = tablas_destino_caso(nombre_caso)
+                etiqueta = f"Caso: {nombre_caso}"
+            else:
+                df = self.estado["df"]
+                atributos = self.estado["atributos_confirmados"]
+                if not atributos or not df:
+                    raise ValueError(
+                        "Confirme la tabla e ingrese las DF antes de generar SQL."
+                    )
+                propuesta = propuesta_nativa(tabla_origen, atributos, df)
+                pendientes = list(propuesta.entidades)
+                entidades_ordenadas = []
+                nombres_creados = set()
+                while pendientes:
+                    disponibles = [
+                        entidad for entidad in pendientes
+                        if all(
+                            destino in nombres_creados
+                            for _, destino, _ in entidad.fk
+                        )
+                    ]
+                    if not disponibles:
+                        entidades_ordenadas.extend(pendientes)
+                        break
+                    for entidad in disponibles:
+                        entidades_ordenadas.append(entidad)
+                        nombres_creados.add(entidad.nombre)
+                        pendientes.remove(entidad)
+                relaciones = {
+                    entidad.nombre: entidad.atributos
+                    for entidad in entidades_ordenadas
+                }
+                claves = {
+                    entidad.nombre: entidad.pk
+                    for entidad in entidades_ordenadas
+                }
+                tipos = self.estado["tipos_confirmados"]
+                claves_foraneas = tuple(
+                    (entidad.nombre, (local,), destino, (remota,))
+                    for entidad in entidades_ordenadas
+                    for local, destino, remota in entidad.fk
+                )
+                sentencias = (
+                    generar_ddl(relaciones, claves, tipos, claves_foraneas)
+                    + generar_upsert_desde(tabla_origen, relaciones, claves)
+                )
+                nombres_destino = tuple(relaciones)
+                etiqueta = f"Síntesis nativa: {tabla_origen}"
             self.estado["resultados"]["sql"] = sentencias
+            self.estado["resultados"]["sql_caso"] = nombre_caso
             self.texto_sql.delete("1.0", tk.END)
             self.texto_sql.insert(
                 tk.END,
-                "BCNF: " + ", ".join(str(sorted(r)) for r in bcnf) + "\n\n",
+                f"-- {etiqueta}\n"
+                f"-- Origen: {tabla_origen}\n"
+                f"-- Tablas propuestas: "
+                f"{', '.join(nombres_destino)}\n"
+                "-- Los INSERT usan claves y ON DUPLICATE KEY UPDATE.\n\n",
             )
             for sentencia in sentencias:
-                self.texto_sql.insert(tk.END, sentencia + ";\n")
+                self.texto_sql.insert(tk.END, sentencia + ";\n\n")
             self.estado_label.configure(text="Propuesta SQL generada")
         except Exception as error:
             self._error(error)
@@ -1375,7 +1701,7 @@ class AplicacionTk(tk.Tk):
             )
             self.texto_sql.delete("1.0", tk.END)
             for sentencia in resultado["sentencias"]:
-                self.texto_sql.insert(tk.END, sentencia + ";\n")
+                self.texto_sql.insert(tk.END, sentencia + ";\n\n")
             self.estado_label.configure(text=resultado["mensaje"])
             return
         if conexion is None:

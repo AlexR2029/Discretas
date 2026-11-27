@@ -9,6 +9,13 @@ CASOS_SQL = {
     "caso_3_bcnf": "caso_3_bcnf.sql",
     "caso_4_dos_claves": "caso_4_dos_claves.sql",
     "caso_5_bcnf_ok": "caso_5_bcnf_ok.sql",
+    "normalizador_prueba_nativa": "normalizador_prueba_nativa.sql",
+}
+
+# Tablas que carga cada archivo. La tabla de prueba es un esquema autónomo;
+# no representa ninguno de los cinco casos académicos.
+TABLA_CARGADA_SQL = {
+    "normalizador_prueba_nativa": "normalizador_prueba_nativa",
 }
 
 

@@ -3,36 +3,23 @@
 Esta fase está en curso. La fase 5 se registra como completada según la
 confirmación del equipo.
 
-## Preparar versiones reproducibles
+## Entorno de compilación
 
-Usa un entorno limpio con Python 3.11 o superior. Instala únicamente las
-dependencias necesarias para ejecutar y empaquetar la aplicación, revisa sus
-versiones y congela la salida de `pip freeze` en `requirements.txt`. Tkinter
-pertenece a Python; MySQL Server se instala por separado.
+El entorno aislado `.venv\release_build` usa Python 3.13.12. Las versiones
+exactas de las dependencias están guardadas en
+`docs/release/requirements.lock.txt`. Tkinter se incluye con Python; MySQL
+Server debe instalarse y estar iniciado por separado.
 
-```powershell
-py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-python -m pip install mysql-connector-python pyinstaller
-python --version
-python -m pip freeze
-```
+## Generar el ejecutable
 
-No rellenes las versiones con valores supuestos: deben corresponder al
-entorno que se usó para compilar y probar el ejecutable.
-
-## Ejecutar la compilación
-
-Cuando `requirements.txt` tenga las versiones exactas y estén instaladas en
-`.venv`, ejecuta:
+Desde la raíz del proyecto, ejecuta:
 
 ```powershell
 .\scripts\build_release.ps1
 ```
 
-El script comprueba Python, Tkinter, el conector MySQL y PyInstaller. El
-ejecutable se guarda en `docs/release/dist/NormalizadorBD.exe`.
+El script revisa Python, Tkinter, Connector/Python y PyInstaller. El archivo
+resultante se guarda en `docs/release/dist/NormalizadorBD.exe`.
 
 ## Lista de comprobación en un equipo limpio
 
@@ -52,14 +39,8 @@ servicio MySQL no inicia durante la presentación.
 
 ## Cierre y versión
 
-Después de que la compilación y la prueba en el equipo limpio pasen, actualizar
-el README con las versiones realmente usadas y crear la etiqueta local `v1.0`.
-No marcar esta fase como completa hasta verificar esos pasos.
+Después de probar el ejecutable en un equipo limpio, actualizar el README con
+las versiones realmente usadas y crear la etiqueta local `v1.0`. La compilación
+y la prueba limpia son pasos separados; el segundo requiere un Windows limpio
+con MySQL configurado.
 
-## Estado de este entorno
-
-No se pudo compilar aquí: Windows no tiene un intérprete Python funcional y
-`.venv` apunta a una instalación base que no está disponible. `requirements.txt`
-está vacío, así que no hay versiones verificadas que congelar todavía. El
-script de compilación queda preparado para ejecutarse cuando se restaure
-Python y se fijen las dependencias.

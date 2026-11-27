@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 
 $projectRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
-$venvPython = Join-Path $projectRoot ".venv\Scripts\python.exe"
+$venvPython = Join-Path $projectRoot ".venv\release_build\Scripts\python.exe"
 $pythonCommand = $null
 
 if (Test-Path -LiteralPath $venvPython) {
@@ -39,9 +39,9 @@ if ($pythonVersion -lt [version]"3.11") {
     throw "Se requiere Python 3.11 o superior; se encontró $versionText."
 }
 
-$requirementsPath = Join-Path $projectRoot "requirements.txt"
+$requirementsPath = Join-Path $projectRoot "docs\release\requirements.lock.txt"
 if (-not (Test-Path -LiteralPath $requirementsPath)) {
-    throw "No existe requirements.txt en la raíz del proyecto."
+    throw "No existe docs\release\requirements.lock.txt."
 }
 $requirements = Get-Content -LiteralPath $requirementsPath
 foreach ($package in @("mysql-connector-python", "pyinstaller")) {
@@ -49,13 +49,13 @@ foreach ($package in @("mysql-connector-python", "pyinstaller")) {
         $_ -match "^\s*$([regex]::Escape($package))==\d+(\.\d+)+\s*$"
     }
     if (-not $pinned) {
-        throw "Falta fijar la versión exacta de $package en requirements.txt antes de compilar."
+        throw "Falta fijar la versión exacta de $package en requirements.lock.txt antes de compilar."
     }
 }
 
 & $pythonCommand -c "import tkinter; import mysql.connector; import PyInstaller"
 if ($LASTEXITCODE -ne 0) {
-    throw "Faltan dependencias de ejecución o empaquetado. Instala las versiones de requirements.txt en .venv."
+    throw "Faltan dependencias de ejecución o empaquetado. Instala las versiones de requirements.lock.txt en el entorno aislado."
 }
 
 $releaseRoot = Join-Path $projectRoot "docs\release"
@@ -64,8 +64,12 @@ $workPath = Join-Path $releaseRoot "build"
 New-Item -ItemType Directory -Force -Path $releaseRoot, $distPath, $workPath | Out-Null
 
 $entryPoint = Join-Path $projectRoot "main.py"
+$sqlScripts = Join-Path $projectRoot "scripts"
 if (-not (Test-Path -LiteralPath $entryPoint)) {
     throw "No se encuentra main.py."
+}
+if (-not (Test-Path -LiteralPath $sqlScripts)) {
+    throw "No se encuentra la carpeta scripts/."
 }
 
 & $pythonCommand -m PyInstaller `
@@ -73,6 +77,7 @@ if (-not (Test-Path -LiteralPath $entryPoint)) {
     --onefile `
     --windowed `
     --name NormalizadorBD `
+    --add-data "$sqlScripts;scripts" `
     --distpath $distPath `
     --workpath $workPath `
     --specpath $releaseRoot `

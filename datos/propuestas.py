@@ -2,9 +2,11 @@
 
 from dataclasses import dataclass
 from collections.abc import Iterable
+from itertools import combinations
 
 from src.dependencias import DF
-from src.cierre import implica
+from src.cierre import cierre, implica
+from src.descomposicion import sintetizar_3fn
 
 
 @dataclass(frozen=True, slots=True)
@@ -179,6 +181,75 @@ TABLA_ORIGEN_CASO = {
     "caso_4_dos_claves": "caso_4_personas",
     "caso_5_bcnf_ok": "caso_5_empleados",
 }
+
+
+def propuesta_nativa(
+    nombre_tabla: str,
+    atributos: Iterable[str],
+    df: Iterable[DF],
+) -> PropuestaCaso:
+    """Sintetiza una propuesta 3FN desde el esquema y las DF ingresadas.
+
+    No consulta propuestas precargadas ni asocia la tabla con un caso.
+    """
+    esquema = frozenset(atributos)
+    dependencias = tuple(df)
+    relaciones = sintetizar_3fn(esquema, dependencias)
+    esquemas: list[tuple[str, frozenset[str], tuple[str, ...]]] = []
+
+    for indice, relacion in enumerate(relaciones, start=1):
+        # Una clave se calcula solo con DF cuyos atributos están en la relación.
+        df_locales = tuple(
+            dependencia for dependencia in dependencias
+            if (dependencia.lado_izquierdo | dependencia.lado_derecho)
+            <= relacion
+        )
+        # La búsqueda de claves mínimas se hace con cierres sobre las DF.
+        claves_locales = claves_por_relacion_candidatas(relacion, df_locales)
+        clave = min(
+            claves_locales or (frozenset(relacion),),
+            key=lambda item: (len(item), sorted(item)),
+        )
+        nombre = f"{nombre_tabla}_r{indice}"
+        esquemas.append((nombre, relacion, tuple(sorted(clave))))
+
+    entidades: list[EntidadPropuesta] = []
+    relaciones_fk: list[RelacionPropuesta] = []
+    for nombre, relacion, clave in esquemas:
+        claves_foraneas = []
+        for nombre_padre, esquema_padre, clave_padre in esquemas:
+            if nombre == nombre_padre or len(clave_padre) != 1:
+                continue
+            atributo = clave_padre[0]
+            if atributo in relacion and atributo in esquema_padre:
+                claves_foraneas.append((atributo, nombre_padre, atributo))
+                relaciones_fk.append(RelacionPropuesta(
+                    nombre, nombre_padre, atributo, atributo
+                ))
+        entidades.append(EntidadPropuesta(
+            nombre,
+            clave,
+            tuple(claves_foraneas),
+            (),
+            tuple(sorted(relacion)),
+        ))
+
+    return PropuestaCaso(tuple(entidades), tuple(relaciones_fk))
+
+
+def claves_por_relacion_candidatas(
+    relacion: frozenset[str], dependencias: tuple[DF, ...]
+) -> tuple[frozenset[str], ...]:
+    """Devuelve claves mínimas de una relación sintetizada."""
+    encontradas: list[frozenset[str]] = []
+    for tamanio in range(1, len(relacion) + 1):
+        for candidato in combinations(sorted(relacion), tamanio):
+            conjunto = frozenset(candidato)
+            if any(clave < conjunto for clave in encontradas):
+                continue
+            if cierre(conjunto, dependencias) >= relacion:
+                encontradas.append(conjunto)
+    return tuple(encontradas)
 
 
 def propuesta_para(

@@ -19,26 +19,6 @@ def escapar(nombre: str) -> str:
     return f"`{validar_nombre_sql(nombre)}`"
 
 
-def relaciones_demo() -> dict[str, frozenset[str]]:
-    """Devuelve la descomposición demostrativa de pedidos_planos."""
-    return {
-        "clientes": frozenset({"id_cliente", "nombre_cliente", "ciudad_cliente"}),
-        "productos": frozenset({"id_producto", "nombre_producto", "precio"}),
-        "pedidos": frozenset({"id_pedido", "id_cliente"}),
-        "detalle_pedido": frozenset({"id_pedido", "id_producto", "cantidad"}),
-    }
-
-
-def claves_demo() -> dict[str, tuple[str, ...]]:
-    """Devuelve las claves primarias de la descomposición demostrativa."""
-    return {
-        "clientes": ("id_cliente",),
-        "productos": ("id_producto",),
-        "pedidos": ("id_pedido",),
-        "detalle_pedido": ("id_pedido", "id_producto"),
-    }
-
-
 def generar_ddl(
     relaciones: Mapping[str, Iterable[str]],
     claves: Mapping[str, Iterable[str]],
@@ -67,22 +47,26 @@ def generar_ddl(
             raise ValueError(f"La relación {tabla} no tiene clave primaria.")
 
         columnas = [
-            f"{escapar(nombre)} {tipos.get(nombre, 'VARCHAR(255)')} "
-            f"{'NOT NULL' if nombre in primario else ''}".strip()
+            f"    {escapar(nombre)} {tipos.get(nombre, 'VARCHAR(255)')}"
+            f"{' NOT NULL' if nombre in primario else ''}"
             for nombre in nombres
         ]
         columnas.append(
-            f"PRIMARY KEY ({', '.join(escapar(nombre) for nombre in primario)})"
+            "    PRIMARY KEY ("
+            + ", ".join(escapar(nombre) for nombre in primario)
+            + ")"
         )
         for _, locales, referencia, remotas in fk_por_tabla.get(tabla, []):
             columnas.append(
-                f"FOREIGN KEY ({', '.join(escapar(nombre) for nombre in locales)}) "
-                f"REFERENCES {escapar(referencia)} "
+                "    FOREIGN KEY ("
+                + ", ".join(escapar(nombre) for nombre in locales)
+                + f") REFERENCES {escapar(referencia)} "
                 f"({', '.join(escapar(nombre) for nombre in remotas)})"
             )
         sentencias.append(
-            f"CREATE TABLE IF NOT EXISTS {escapar(tabla)} "
-            f"({', '.join(columnas)})"
+            f"CREATE TABLE IF NOT EXISTS {escapar(tabla)} (\n"
+            + ",\n".join(columnas)
+            + "\n)"
         )
     return tuple(sentencias)
 
@@ -101,33 +85,44 @@ def generar_insertar_desde(
     sentencias: list[str] = []
     for tabla, atributos in relaciones.items():
         nombres = tuple(sorted(frozenset(atributos)))
-        columnas = ", ".join(escapar(nombre) for nombre in nombres)
+        columnas = ",\n    ".join(escapar(nombre) for nombre in nombres)
         sentencias.append(
-            f"INSERT INTO {escapar(tabla)} ({columnas}) "
-            f"SELECT DISTINCT {columnas} FROM {escapar(tabla_origen)}"
+            f"INSERT INTO {escapar(tabla)} (\n    {columnas}\n)\n"
+            f"SELECT DISTINCT\n    {columnas}\n"
+            f"FROM {escapar(tabla_origen)}"
         )
     return tuple(sentencias)
 
 
-def generar_migracion_demo(tabla_origen: str = "pedidos_planos",
-                           tipos: Mapping[str, str] | None = None) -> tuple[str, ...]:
-    """Genera DDL e inserción completa para el caso demostrativo."""
-    relaciones = relaciones_demo()
-    claves = claves_demo()
-    fks = (
-        ("pedidos", ("id_cliente",), "clientes", ("id_cliente",)),
-        ("detalle_pedido", ("id_pedido",), "pedidos", ("id_pedido",)),
-        ("detalle_pedido", ("id_producto",), "productos", ("id_producto",)),
-    )
-    ddl = generar_ddl(relaciones, claves, tipos, fks)
-    borrados = (
-        "DELETE FROM `detalle_pedido`",
-        "DELETE FROM `pedidos`",
-        "DELETE FROM `productos`",
-        "DELETE FROM `clientes`",
-    )
-    inserts = generar_insertar_desde(tabla_origen, relaciones)
-    return ddl + borrados + inserts
+def generar_upsert_desde(
+    tabla_origen: str,
+    relaciones: Mapping[str, Iterable[str]],
+    claves: Mapping[str, Iterable[str]],
+) -> tuple[str, ...]:
+    """Migra proyecciones distintas y actualiza filas ya existentes."""
+    validar_nombre_sql(tabla_origen)
+    sentencias: list[str] = []
+    for tabla, atributos in relaciones.items():
+        validar_nombre_sql(tabla)
+        nombres = tuple(sorted(frozenset(atributos)))
+        clave = tuple(claves.get(tabla, ()))
+        if not clave or not set(clave).issubset(nombres):
+            raise ValueError(f"La relación {tabla} no tiene una clave válida.")
+        columnas = ",\n    ".join(escapar(nombre) for nombre in nombres)
+        actualizaciones = tuple(
+            nombre for nombre in nombres if nombre not in clave
+        ) or clave[:1]
+        asignaciones = ",\n    ".join(
+            f"{escapar(nombre)} = VALUES({escapar(nombre)})"
+            for nombre in actualizaciones
+        )
+        sentencias.append(
+            f"INSERT INTO {escapar(tabla)} (\n    {columnas}\n)\n"
+            f"SELECT DISTINCT\n    {columnas}\n"
+            f"FROM {escapar(tabla_origen)}\nWHERE 1\n"
+            f"ON DUPLICATE KEY UPDATE\n    {asignaciones}"
+        )
+    return tuple(sentencias)
 
 
 def ejecutar_migracion(conexion, sentencias: Iterable[str],
@@ -148,6 +143,8 @@ def ejecutar_migracion(conexion, sentencias: Iterable[str],
 
     cursor = conexion.cursor()
     try:
+        # Cierra lecturas previas de la misma conexión antes de comenzar.
+        conexion.commit()
         conexion.start_transaction()
         for sentencia in lista:
             cursor.execute(sentencia)

@@ -76,6 +76,29 @@ Dependencia Funcional:
 {id_pedido, id_producto} -> cantidad
 (Cumple 3FN y BCNF porque la PK compuesta es la Superclave completa)
 
+Esquema SQL:
+-- 1. Tabla de Entidad Producto (3FN / BCNF)
+CREATE TABLE productos (
+    id_producto INT NOT NULL,
+    nombre_producto VARCHAR(100) NOT NULL,
+    precio DECIMAL(10,2) NOT NULL,
+    PRIMARY KEY (id_producto)
+);
+
+-- 2. Tabla Relacional de Detalle de Pedido (3FN / BCNF)
+CREATE TABLE pedido_detalles (
+    id_pedido INT NOT NULL,
+    id_producto INT NOT NULL,
+    cantidad INT NOT NULL,
+
+    PRIMARY KEY (id_pedido, id_producto),
+
+    FOREIGN KEY (id_producto)
+        REFERENCES productos(id_producto)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+);
+
 ## Caso 2
 ===================================================================
 1. DEPENDENCIAS FUNCIONALES (DFs) VERDADERAS
@@ -127,6 +150,29 @@ ESTUDIANTE ( codigo_estudiante [PK], nombres, programa [FK] )
 Dependencia Funcional:
 codigo_estudiante -> nombres, programa
 (Cumple 3FN y BCNF porque 'codigo_estudiante' es Superclave)
+
+Esquema SQL:
+-- 1. Tabla de Entidad Catálogo Programa (3FN / BCNF)
+CREATE TABLE programas (
+    programa VARCHAR(100) NOT NULL,
+    valor_semestre DECIMAL(12,2) NOT NULL,
+    PRIMARY KEY (programa)
+);
+
+-- 2. Tabla de Entidad Estudiante (3FN / BCNF)
+CREATE TABLE estudiantes (
+    codigo_estudiante INT NOT NULL,
+    nombres VARCHAR(100) NOT NULL,
+    programa VARCHAR(100) NOT NULL,
+
+    PRIMARY KEY (codigo_estudiante),
+
+    FOREIGN KEY (programa)
+        REFERENCES programas(programa)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+);
+
 ## Caso 3
 ===================================================================
 1. DEPENDENCIAS FUNCIONALES (DFs) VERDADERAS
@@ -204,6 +250,27 @@ Dependencia Funcional:
 {alumno, profesor} -> (Ningún atributo no clave)
 (Cumple BCNF porque la PK compuesta cubre la totalidad de la entidad)
 
+Sentenccia SQL:
+-- 1. Tabla de Entidad Profesor-Curso (3FN / BCNF)
+CREATE TABLE profesores_cursos (
+    profesor VARCHAR(100) NOT NULL,
+    curso VARCHAR(50) NOT NULL,
+    PRIMARY KEY (profesor)
+);
+
+-- 2. Tabla Relacional Alumno-Profesor (3FN / BCNF)
+CREATE TABLE alumno_profesor (
+    alumno VARCHAR(50) NOT NULL,
+    profesor VARCHAR(100) NOT NULL,
+
+    PRIMARY KEY (alumno, profesor),
+
+    FOREIGN KEY (profesor)
+        REFERENCES profesores_cursos(profesor)
+        ON DELETE RESTRICT
+        ON UPDATE CASCADE
+);
+
 ## Caso 4
 ===================================================================
 1. DEPENDENCIAS FUNCIONALES (DFs) VERDADERAS
@@ -267,6 +334,20 @@ Esta tabla NO REQUIERE DESCOMPOSICIÓN. Tener múltiples llaves candidatas
 simples (como DNI y Email) no viola la Forma Normal de Boyce-Codd 
 siempre y cuando cada determinante sea una superclave por sí solo.
 
+Esquema SQL:
+-- Esquema Validado y Optimizado (3FN / BCNF)
+
+CREATE TABLE personas (
+    dni VARCHAR(20) NOT NULL,
+    email VARCHAR(120) NOT NULL,
+    nombre VARCHAR(100) NOT NULL,
+    ciudad VARCHAR(100) NOT NULL,
+
+    PRIMARY KEY (dni),
+
+    CONSTRAINT uk_persona_email UNIQUE (email)
+);
+
 ## Caso 5
 ===================================================================
 1. DEPENDENCIAS FUNCIONALES (DFs) VERDADERAS
@@ -322,3 +403,13 @@ Conclusión:
 Esta tabla NO REQUIERE DESCOMPOSICIÓN. Posee un diseño relacional atómico, 
 sin dependencias parciales ni transitivas, cumpliendo de forma natural 
 con los criterios de BCNF.
+
+-- Esquema Validado y Optimizado (3FN / BCNF)
+
+CREATE TABLE empleados (
+    id_empleado INT NOT NULL,
+    nombre VARCHAR(100) NOT NULL,
+    ciudad VARCHAR(100) NOT NULL,
+
+    PRIMARY KEY (id_empleado)
+);
